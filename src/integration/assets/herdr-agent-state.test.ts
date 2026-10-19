@@ -735,7 +735,7 @@ test("Claude progress hook maps TaskCreate to an update_progress append", async 
     subject: "A",
     status: "pending",
   });
-  expect(typeof request.params.seq).toBe("number");
+  expect(request.params).not.toHaveProperty("seq");
 });
 
 // AC-1.8
@@ -778,6 +778,7 @@ test("Claude progress hook maps TaskUpdate to a status or subject update", async
   ]);
   expect(requests[0].params).toMatchObject({ id: "1", status: "completed" });
   expect(requests[0].params).not.toHaveProperty("subject");
+  expect(requests[0].params).not.toHaveProperty("seq");
   expect(requests[1].params).toMatchObject({ id: "2", status: "deleted", subject: "Renamed" });
 });
 
@@ -804,6 +805,7 @@ test("Claude progress hook maps TaskList to a whole-list report", async () => {
     { id: "3", text: "C", status: "pending" },
   ]);
   expect(request.params).toMatchObject({ source: "herdr:claude", agent: "claude" });
+  expect(typeof request.params.seq).toBe("number");
 });
 
 // AC-1.8

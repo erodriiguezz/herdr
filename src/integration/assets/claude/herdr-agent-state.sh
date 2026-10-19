@@ -98,7 +98,10 @@ def progress_request(request_id, report_seq):
     tool_response = as_json(hook_input.get("tool_response"))
     if not isinstance(tool_input, dict):
         tool_input = {}
-    base = {"pane_id": pane_id, "source": source, "agent": "claude", "seq": report_seq}
+    # Deltas carry no seq: parallel tool calls run parallel hook processes whose
+    # time stamps can reorder, and a stale create would be dropped. Only the
+    # full TaskList report is sequenced.
+    base = {"pane_id": pane_id, "source": source, "agent": "claude"}
     if tool_name == "TaskCreate":
         task = tool_response.get("task") if isinstance(tool_response, dict) else None
         task = task if isinstance(task, dict) else {}
@@ -143,7 +146,7 @@ def progress_request(request_id, report_seq):
         return {
             "id": request_id,
             "method": "pane.report_progress",
-            "params": dict(base, items=items),
+            "params": dict(base, seq=report_seq, items=items),
         }
     return None
 

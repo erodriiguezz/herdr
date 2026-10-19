@@ -111,7 +111,7 @@ herdr integration install claude
 
 The hook reports Claude Code session identity to the local Herdr socket on session start. Claude Code state comes from Herdr's screen manifest detection.
 
-A second `PostToolUse` hook, matched to `TaskCreate|TaskUpdate|TaskList`, forwards Claude Code's task list to the pane through `pane.update_progress` and `pane.report_progress`. The pane then shows a `done/total` progress token, and `herdr pane progress <pane>` prints the checklist. The progress hook runs on Linux and macOS; the Windows script does not forward it yet.
+A second `PostToolUse` hook, matched to `TaskCreate|TaskUpdate|TaskList`, forwards Claude Code's task list to the pane through `pane.update_progress` and `pane.report_progress`. The pane then shows a `done/total` progress token, and `herdr pane progress <pane>` prints the checklist.
 
 Claude integration v10 matches only the documented `SessionStart` sources: `startup`, `resume`, `clear`, `compact`, and `fork`. This prevents Grok's `new` and `load` events from launching the imported Herdr Claude hook, without disabling unrelated Claude-compatible hooks. Reinstall the Claude integration after upgrading to migrate the previous wildcard matcher. New Claude source values require an integration update.
 
