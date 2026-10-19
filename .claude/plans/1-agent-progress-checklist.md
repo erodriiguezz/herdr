@@ -4,13 +4,13 @@ title: Agent progress checklist per pane
 branch: feat/agent-progress-checklist
 status: approved
 approved_by: Ernesto
-approved_at: 2026-10-17
+approved_at: 2026-10-19
 autonomy: pr
 source: request
 mvp:
 size: M
 est_tokens: 400000
-est_lines: 350
+est_lines: 430
 shape: single
 feature_branch:
 base: master
@@ -27,7 +27,7 @@ Fork-only work (`erodriiguezz/herdr`). Upstream PRs are not possible (not a main
 
 **Why:** No visibility into how far along an agent is without opening its pane. It is small and low risk, and the checklist popup can build on the server-side path it adds.
 
-**How:** Herdr stores the checklist in server state behind a new `pane.report_progress` method. The Claude integration adds a hook limited to the task-list tools that reports each change, and the server derives a `progress` display value into the sidebar data that already reaches the client. Turned down: a hook-only display value via `pane.report_metadata`, which gives a count but no checklist and nothing to query.
+**How:** Herdr stores the checklist in server state. `pane.report_progress` replaces the whole list and `pane.update_progress` adds or changes one item by id, so the server does the merging. The Claude integration adds a stateless hook on `TaskCreate`, `TaskUpdate` and `TaskList` that forwards each change, and the server derives a `progress` display value into the sidebar data that already reaches the client. Turned down: a hook-only display value via `pane.report_metadata`, which gives a count but no checklist and nothing to query.
 
 **Blast radius**
 - Touches: terminal server state (new in-memory field), API schema (2 new methods), CLI (`herdr pane progress`), the Claude integration assets (`.sh` and `.ps1`) and the hook installer, the default agent sidebar row, and the `docs/next` website docs.
@@ -37,7 +37,10 @@ Fork-only work (`erodriiguezz/herdr`). Upstream PRs are not possible (not a main
 
 **Concerns:**
 - Upstream deliberately made Claude hooks session-only (`295b09ca`). Re-adding a per-tool hook diverges the fork from upstream, accepted on purpose. The matcher limits it to the task-list tools.
-- Not verified yet: which task tools Claude Code 2.1.302 uses (`TodoWrite` sends the full list; newer `TaskCreate`/`TaskUpdate` may send one change at a time). The builder captures the real hook payload first. If it is not a full list, the builder stops and writes a Hand-off with the payload instead of guessing at a merge design.
+- Resolved by revision 2: Claude Code 2.1.303 has no `TodoWrite`; `TaskCreate`/`TaskUpdate` send one change per call and only `TaskList` sends the full list (payloads in the Hand-off below). Hence the server-side update method.
+- Not verified yet: whether an interactive Claude session offers the task tools by default (the capture used `claude -p --tools`). If the live smoke can't get Claude to use them, AC-1.7 becomes a Hand-off; everything else still ships.
+- A `TaskUpdate` for an id herdr has never seen (for example tasks created before a herdr restart) is ignored until the next `TaskList` resyncs the list.
+- Size: about 430 counted lines, slightly over the 400 guide, accepted as one purpose in one PR.
 - Committing `.claude/plans/` and `.claude/project.json` to the fork's master adds files upstream doesn't have. Accepted.
 
 **Security**
@@ -47,18 +50,19 @@ Fork-only work (`erodriiguezz/herdr`). Upstream PRs are not possible (not a main
 - Abuse: a buggy or hostile local reporter could flood the server or inject terminal escapes into the sidebar. Control: at most 100 items of 500 chars each (larger reports are rejected with an error), control characters stripped before storing, and stale reports dropped by `seq` like the existing report methods.
 
 **Acceptance criteria**
+- **Update by id** (AC-1.9) — `pane.update_progress` with a new id appends a pending item; with a known id it changes that item's status (and subject when given); status `deleted` removes it; an unknown id with no subject is ignored; the 100-item and 500-char limits and `seq` staleness apply; the sidebar count follows.
 - **Report and read** (AC-1.1) — `pane.report_progress` with 7 items (3 completed) stores them; `pane.progress` and `herdr pane progress <pane>` return the same 7 items in order with ✓ for completed, ▸ for in progress and ☐ for pending, plus `done: 3, total: 7`.
 - **Sidebar count** (AC-1.2) — with the default sidebar config, the pane's agent row shows `3/7`; a pane with no checklist shows nothing extra.
 - **Updates replace** (AC-1.3) — a newer report replaces the list; a report with an older `seq` is ignored; an empty item list clears the checklist and the sidebar count.
 - **Lifecycle** (AC-1.4) — the checklist clears when the pane's agent session id changes, when the agent exits, and does not survive a herdr restart.
 - **Limits and sanitising** (AC-1.5) — more than 100 items or an item over 500 chars is rejected with an error and leaves the previous checklist unchanged; control and escape characters in item text never reach the sidebar or CLI output.
 - **Unknown pane** (AC-1.6) — reporting or reading progress for a pane that doesn't exist returns the standard not-found error.
-- **Claude end to end** (AC-1.7) — in a throwaway herdr session running Claude Code 2.1.302, asking Claude for a multi-step task makes the sidebar count appear and advance to `N/N`, and `herdr pane progress` matches Claude's own list. Recorded with the CLI version and the tool names seen.
-- **Hook install** (AC-1.8) — installing the Claude integration adds exactly one task-list hook with the right matcher next to the SessionStart hook; re-installing doesn't duplicate it; the integration version is bumped once from the latest release tag; `.sh` and `.ps1` behave the same.
+- **Claude end to end** (AC-1.7) — in a throwaway herdr session running Claude Code 2.1.303 interactively, asking Claude for a multi-step task makes the sidebar count appear and advance to `N/N`, and `herdr pane progress` matches Claude's own list. Recorded with the CLI version and the tool names seen.
+- **Hook install** (AC-1.8) — installing the Claude integration adds exactly one `PostToolUse` hook matching `TaskCreate|TaskUpdate|TaskList` next to the SessionStart hook; re-installing doesn't duplicate it; the integration version is bumped once from the latest release tag; `.sh` and `.ps1` behave the same.
 
 **How it will be proven:** unit tests on the terminal state model and `AppState::test_new()`, API and CLI tests, installer tests, `just check`, then a live smoke with a real Claude Code session through the `herdr-throwaway-repro` skill. Herdr is a TUI, so there are no browser tests.
 
-**Size** M · ~350 counted lines (plus tests) · ~400k tokens · single PR
+**Size** M · ~430 counted lines (plus tests) · ~400k tokens · single PR
 
 **Out of scope:** the checklist popup inside herdr (next PR), a `pane.progress_changed` event (`EventKind` may be reachable from a frozen codec, so it needs its own contract review), saving checklists across restarts, progress reporting from the other 18 agent integrations (they can call the method; wiring them is later).
 
@@ -83,8 +87,9 @@ Fork-only work (`erodriiguezz/herdr`). Upstream PRs are not possible (not a main
 - **State (server, pure data):** add `progress: Option<AgentProgress>` to `TerminalState` (where herdr keeps agent metadata), where `AgentProgress { items: Vec<ProgressItem>, done: usize, total: usize, source, last_seq }` and `ProgressItem { text: String, status: ProgressStatus }`. `ProgressStatus` is `Pending | InProgress | Completed`, plus an `Unknown` fallback when deserializing. Cleared wherever the pane's agent session id changes or the agent is released. Not added to persistence.
 - **API (shared runtime fact, neutral names):** `pane.report_progress { pane_id, source, agent?, seq?, items }` replaces the list (an empty list clears it) and reuses `metadata_tokens::accept_sequence` for staleness. `pane.progress { pane_id }` returns `{ items, done, total }`, or an empty result when nothing is set. Both are new advertised methods. No change to existing method shapes, so `tests/fixtures/endpoint-method-shapes-v1.json` stays untouched.
 - **Display (no wire change):** when progress changes, the server sets a derived `progress` token (`"3/7"`) in the pane's token map, which already goes to the client as `tokens: Vec<(String, String)>`. While a checklist exists, the derived value takes precedence over a user-reported `progress` metadata token. The default agent sidebar row gains `Custom("progress")`, which renders nothing when it's absent. The value is computed once per report, never in render.
+- **Update by id:** `pane.update_progress { pane_id, source, agent?, seq?, id, subject?, status? }` upserts one item; items carry an optional `id`. Status `deleted` removes the item. Unknown id without subject → no change. New advertised method; no existing shape changes.
 - **CLI:** `herdr pane progress <pane> [--json]` through the existing `cli_params!` projection pattern, printing `✓`/`▸`/`☐ text`.
-- **Claude integration:** the installer adds a `PostToolUse` hook (matcher: the task-list tool names confirmed live) calling the hook script with action `progress`. The script maps `tool_input.todos[].{content,status}` to items and sends `pane.report_progress`. Make sure the `HOOK_REMOVALS` cleanup of legacy herdr `PostToolUse` hooks does not delete the new matcher hook. Change `.sh` and `.ps1` together, and bump `HERDR_INTEGRATION_VERSION` and the matching constant once relative to the latest release tag.
+- **Claude integration:** the installer adds a `PostToolUse` hook with matcher `TaskCreate|TaskUpdate|TaskList`, calling the hook script with action `progress`. The script is stateless: `TaskCreate` → `pane.update_progress` with `tool_response.task.id` and `tool_input.subject`; `TaskUpdate` → `pane.update_progress` with `tool_input.taskId` and `status`; `TaskList` → `pane.report_progress` with `tool_response.tasks[]` mapped to `{id, text: subject, status}`. Make sure the `HOOK_REMOVALS` cleanup of legacy herdr `PostToolUse` hooks does not delete the new matcher hook. Change `.sh` and `.ps1` together, and bump `HERDR_INTEGRATION_VERSION` and the matching constant once relative to the latest release tag.
 
 ```mermaid
 flowchart LR
@@ -107,6 +112,7 @@ flowchart LR
 | --- | --- | --- | --- |
 | socket JSON API | `pane.report_progress` | new, advertised | No |
 | socket JSON API | `pane.progress` | new, advertised | No |
+| socket JSON API | `pane.update_progress` | new, advertised (revision 2) | No |
 | CLI | `herdr pane progress` | new subcommand | No |
 
 ### Impact set
@@ -143,7 +149,7 @@ Line numbers are from `master` at `143bf5fd` and are only a guide; the builder a
 - `src/api/schema.rs` (~line 126): register `PaneReportProgress => "pane.report_progress"` and `PaneProgress => "pane.progress"` after `PaneReportMetadata`.
 - `src/api/schema/operations.rs` (~line 197): add both names to the pane operations list.
 - `src/app/api.rs` (~line 1195): dispatch both variants beside `Method::PaneReportMetadata`.
-- `src/app/api/panes.rs`: `handle_pane_report_progress` and `handle_pane_progress`, after `handle_pane_report_metadata` (~line 1701). They reuse its pane lookup, not-found error and `metadata_tokens::accept_sequence` staleness check.
+- `src/app/api/panes.rs`: `handle_pane_report_progress`, `handle_pane_progress` and (revision 2) `handle_pane_update_progress`, after `handle_pane_report_metadata` (~line 1701). They reuse its pane lookup, not-found error and `metadata_tokens::accept_sequence` staleness check.
 - `docs/next/api/herdr-api.schema.json`: regenerate it with the project's schema recipe, not by hand.
 
 **Display: the count reaches the sidebar through the existing tokens**
@@ -182,7 +188,8 @@ none
 - AC-1.5 unit: 101 items rejected, 501-char item rejected, previous list kept; ESC/C0 stripped
 - AC-1.6 API: unknown pane → not-found for both methods
 - AC-1.8 installer: hook added once with matcher, idempotent on re-install, survives legacy `PostToolUse` cleanup; version bumped
-- AC-1.8 hook script: `herdr-agent-state.test.ts` case for the `progress` action payload mapping
+- AC-1.9 unit/API: append new id, update status, update subject, `deleted` removes, unknown id ignored, limits and stale `seq`, sidebar token follows
+- AC-1.8 hook script: `herdr-agent-state.test.ts` cases mapping the captured TaskCreate, TaskUpdate and TaskList payloads
 - AC-1.7 live smoke (manual, recorded in evidence): Claude Code 2.1.302 in a throwaway session
 
 ### Screens
