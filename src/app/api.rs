@@ -1195,6 +1195,15 @@ impl App {
             Method::PaneReportMetadata(params) => {
                 return self.handle_pane_report_metadata(request.id, params);
             }
+            Method::PaneReportProgress(params) => {
+                return self.handle_pane_report_progress(request.id, params);
+            }
+            Method::PaneUpdateProgress(params) => {
+                return self.handle_pane_update_progress(request.id, params);
+            }
+            Method::PaneProgress(target) => {
+                return self.handle_pane_progress(request.id, target);
+            }
             Method::PaneClearAgentAuthority(params) => {
                 return self.handle_pane_clear_agent_authority(request.id, params);
             }

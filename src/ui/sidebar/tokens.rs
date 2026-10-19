@@ -481,6 +481,25 @@ rows = [[{ token = "$load", rules = [{ lt = 50, hide = true }] }], ["workspace"]
         );
     }
 
+    // AC-1.2
+    #[test]
+    fn default_agent_rows_show_progress_only_when_a_checklist_exists() {
+        let config = AgentsSidebarConfig::default();
+        let mut entry = entry();
+        let without = agent_rows(&config, context(&entry), "working");
+        assert!(!without
+            .iter()
+            .flatten()
+            .any(|token| matches!(token.kind, ResolvedTokenKind::Custom(_))));
+
+        entry.tokens.insert("progress".into(), "3/7".into());
+        let with = agent_rows(&config, context(&entry), "working");
+        assert!(with
+            .iter()
+            .flatten()
+            .any(|token| token.kind == ResolvedTokenKind::Custom("3/7".into())));
+    }
+
     #[test]
     fn terminal_title_builtins_are_distinct_from_custom_tokens() {
         let mut entry = entry();

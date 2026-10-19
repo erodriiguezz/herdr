@@ -2,11 +2,11 @@
 # managed by herdr; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # HERDR_INTEGRATION_ID=claude
-# HERDR_INTEGRATION_VERSION=11
+# HERDR_INTEGRATION_VERSION=12
 
 param([string]$Action = "")
 
-if ($Action -ne "session") { exit 0 }
+if ($Action -ne "session" -and $Action -ne "progress") { exit 0 }
 if ($env:HERDR_ENV -ne "1") { exit 0 }
 if ([string]::IsNullOrWhiteSpace($env:HERDR_PANE_ID)) { exit 0 }
 
@@ -22,14 +22,124 @@ try {
 
 $propertyNames = @($payload.PSObject.Properties.Name)
 if ((Test-Path Env:CURSOR_VERSION) -or $propertyNames -ccontains "cursor_version") { exit 0 }
-if (-not ($propertyNames -ccontains "hook_event_name") -or $payload.hook_event_name -isnot [string] -or $payload.hook_event_name -cne "SessionStart") { exit 0 }
+$expectedEvent = if ($Action -eq "progress") { "PostToolUse" } else { "SessionStart" }
+if (-not ($propertyNames -ccontains "hook_event_name") -or $payload.hook_event_name -isnot [string] -or $payload.hook_event_name -cne $expectedEvent) { exit 0 }
+
+$herdr = if ([string]::IsNullOrWhiteSpace($env:HERDR_BIN_PATH)) { "herdr" } else { $env:HERDR_BIN_PATH }
+
+if ($Action -eq "progress") {
+    # Claude's task tools report one change per call; only TaskList carries the
+    # whole list. The mapping is stateless: herdr merges the deltas. Deltas carry
+    # no --seq so parallel hook processes cannot make herdr drop one as stale.
+    # Subagent calls are forwarded: the task list is shared per session.
+    function ConvertFrom-ToolValue($value) {
+        if ($value -is [string]) {
+            try { return ($value | ConvertFrom-Json) } catch { return $null }
+        }
+        return $value
+    }
+    function ConvertTo-TextValue($value) {
+        if ($null -eq $value -or $value -is [bool]) { return $null }
+        if ($value -is [string]) {
+            if ([string]::IsNullOrWhiteSpace($value)) { return $null }
+            return $value
+        }
+        if ($value -is [int] -or $value -is [long] -or $value -is [double]) { return "$value" }
+        return $null
+    }
+    # Windows PowerShell 5.1 and PowerShell < 7.3 pass native arguments through
+    # unmodified, so quote them by hand with the MSVCRT rules that herdr's
+    # argument parser undoes: backslashes are literal unless they precede a
+    # double quote (or the closing quote), where they are doubled. PowerShell
+    # 7.3+ quotes correctly itself. The same algorithm is checked by the
+    # reference implementation in herdr-agent-state.test.ts (this script itself
+    # is not executed by any test).
+    function Format-NativeArg([string]$value) {
+        if ($null -ne $PSNativeCommandArgumentPassing) { return $value }
+        if ($value.Length -gt 0 -and $value.IndexOfAny([char[]]@(" ", "`t", '"')) -lt 0) { return $value }
+        $quoted = New-Object System.Text.StringBuilder
+        [void]$quoted.Append('"')
+        $backslashes = 0
+        foreach ($char in $value.ToCharArray()) {
+            if ($char -eq [char]92) {
+                $backslashes++
+                continue
+            }
+            if ($char -eq [char]34) {
+                [void]$quoted.Append([string]::new([char]92, $backslashes * 2 + 1))
+            } elseif ($backslashes -gt 0) {
+                [void]$quoted.Append([string]::new([char]92, $backslashes))
+            }
+            [void]$quoted.Append($char)
+            $backslashes = 0
+        }
+        if ($backslashes -gt 0) { [void]$quoted.Append([string]::new([char]92, $backslashes * 2)) }
+        [void]$quoted.Append('"')
+        return $quoted.ToString()
+    }
+    $statuses = @("pending", "in_progress", "completed", "deleted")
+    try {
+        $toolInput = ConvertFrom-ToolValue $payload.tool_input
+        $toolResponse = ConvertFrom-ToolValue $payload.tool_response
+        $common = @("--source", "herdr:claude", "--agent", "claude")
+        $args = $null
+        if ($payload.tool_name -ceq "TaskCreate") {
+            $task = if ($null -ne $toolResponse) { $toolResponse.task } else { $null }
+            $taskId = ConvertTo-TextValue $task.id
+            $subject = ConvertTo-TextValue $toolInput.subject
+            if (-not $subject) { $subject = ConvertTo-TextValue $task.subject }
+            if (-not $taskId -or -not $subject) { exit 0 }
+            $args = @("pane", "update-progress", $env:HERDR_PANE_ID) + $common + @("--id", (Format-NativeArg $taskId), "--subject", (Format-NativeArg $subject), "--status", "pending")
+        } elseif ($payload.tool_name -ceq "TaskUpdate") {
+            $taskId = ConvertTo-TextValue $toolInput.taskId
+            if (-not $taskId) { exit 0 }
+            $extra = @()
+            if ($toolInput.status -is [string] -and $statuses -ccontains $toolInput.status) { $extra += @("--status", $toolInput.status) }
+            $subject = ConvertTo-TextValue $toolInput.subject
+            if ($subject) { $extra += @("--subject", (Format-NativeArg $subject)) }
+            if ($extra.Count -eq 0) { exit 0 }
+            $args = @("pane", "update-progress", $env:HERDR_PANE_ID) + $common + @("--id", (Format-NativeArg $taskId)) + $extra
+        } elseif ($payload.tool_name -ceq "TaskList") {
+            $tasks = $null
+            $hasList = $false
+            if ($toolResponse -is [array]) {
+                $tasks = $toolResponse
+                $hasList = $true
+            } elseif ($null -ne $toolResponse -and $toolResponse.PSObject.Properties.Name -contains "tasks") {
+                $tasks = $toolResponse.tasks
+                $hasList = $true
+            }
+            if (-not $hasList) { exit 0 }
+            $items = @()
+            foreach ($task in @($tasks)) {
+                if ($null -eq $task) { continue }
+                $subject = ConvertTo-TextValue $task.subject
+                if (-not $subject -or $task.status -ceq "deleted") { continue }
+                $item = [ordered]@{}
+                $taskId = ConvertTo-TextValue $task.id
+                if ($taskId) { $item["id"] = $taskId }
+                $item["text"] = $subject
+                $item["status"] = if ($task.status -is [string] -and $statuses -ccontains $task.status) { $task.status } else { "pending" }
+                $items += $item
+            }
+            $json = ConvertTo-Json -InputObject @($items) -Compress -Depth 5
+            $seq = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+            $args = @("pane", "report-progress", $env:HERDR_PANE_ID) + $common + @("--seq", "$seq", "--items-json", (Format-NativeArg $json))
+        } else {
+            exit 0
+        }
+        & $herdr @args 2>$null | Out-Null
+    } catch {
+    }
+    exit 0
+}
+
 if (-not [string]::IsNullOrWhiteSpace($payload.agent_id)) { exit 0 }
 
 $sessionId = $payload.session_id
 if ([string]::IsNullOrWhiteSpace($sessionId)) { exit 0 }
 
 $seq = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-$herdr = if ([string]::IsNullOrWhiteSpace($env:HERDR_BIN_PATH)) { "herdr" } else { $env:HERDR_BIN_PATH }
 try {
     $args = @(
         "pane",

@@ -26,3 +26,13 @@ __pycache__/
 
 /.wrangler/
 **/.wrangler/
+# Claude delivery process — per-run state (plans, .claude/qa/ and .claude/project.json ARE committed)
+.claude/budget/
+.claude/artifacts/
+.claude/review/
+.claude/test-report.json
+.claude/target-report.json
+.claude/settings.local.json
+.worktrees/
+test-results/
+playwright-report/

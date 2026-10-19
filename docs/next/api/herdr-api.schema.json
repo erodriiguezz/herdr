@@ -3084,6 +3084,43 @@
           ],
           "type": "object"
         },
+        "PaneReportProgressParams": {
+          "description": "Replaces the pane's agent progress checklist. An empty `items` list clears it.",
+          "properties": {
+            "agent": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "items": {
+              "items": {
+                "$ref": "#/schemas/request/$defs/ProgressItem"
+              },
+              "type": "array"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "source": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "source",
+            "items"
+          ],
+          "type": "object"
+        },
         "PaneResizeParams": {
           "properties": {
             "amount": {
@@ -3338,6 +3375,56 @@
           "required": [
             "start",
             "end"
+          ],
+          "type": "object"
+        },
+        "PaneUpdateProgressParams": {
+          "description": "Upserts one checklist item by id. `deleted` removes it; an unknown id\nwithout a `subject` is ignored.",
+          "properties": {
+            "agent": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "source": {
+              "type": "string"
+            },
+            "status": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/ProgressUpdateStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "subject": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "pane_id",
+            "source",
+            "id"
           ],
           "type": "object"
         },
@@ -3828,6 +3915,67 @@
             "id"
           ],
           "type": "object"
+        },
+        "ProgressItem": {
+          "properties": {
+            "id": {
+              "description": "Stable identifier used by `pane.update_progress`; optional for full reports.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status": {
+              "$ref": "#/schemas/request/$defs/ProgressStatus",
+              "default": "pending"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "type": "object"
+        },
+        "ProgressStatus": {
+          "oneOf": [
+            {
+              "enum": [
+                "pending",
+                "in_progress",
+                "completed"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "unknown",
+              "description": "Any status this server does not recognise; treated as pending.",
+              "type": "string"
+            }
+          ]
+        },
+        "ProgressUpdateStatus": {
+          "oneOf": [
+            {
+              "enum": [
+                "pending",
+                "in_progress",
+                "completed"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "deleted",
+              "description": "Removes the item.",
+              "type": "string"
+            },
+            {
+              "const": "unknown",
+              "description": "Any status this server does not recognise; treated as no status change.",
+              "type": "string"
+            }
+          ]
         },
         "ReadFormat": {
           "enum": [
@@ -5969,6 +6117,54 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/PaneReportMetadataParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.report_progress",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneReportProgressParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.update_progress",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneUpdateProgressParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.progress",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneTarget"
             }
           },
           "required": [
@@ -8342,6 +8538,36 @@
           ],
           "type": "object"
         },
+        "PaneProgressResult": {
+          "properties": {
+            "done": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "items": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/ProgressItem"
+              },
+              "type": "array"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "total": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "pane_id",
+            "items",
+            "done",
+            "total"
+          ],
+          "type": "object"
+        },
         "PaneReadResult": {
           "properties": {
             "format": {
@@ -9149,6 +9375,45 @@
             }
           ]
         },
+        "ProgressItem": {
+          "properties": {
+            "id": {
+              "description": "Stable identifier used by `pane.update_progress`; optional for full reports.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "status": {
+              "$ref": "#/schemas/success_response/$defs/ProgressStatus",
+              "default": "pending"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "type": "object"
+        },
+        "ProgressStatus": {
+          "oneOf": [
+            {
+              "enum": [
+                "pending",
+                "in_progress",
+                "completed"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "unknown",
+              "description": "Any status this server does not recognise; treated as pending.",
+              "type": "string"
+            }
+          ]
+        },
         "ReadFormat": {
           "enum": [
             "text",
@@ -9795,6 +10060,22 @@
               "required": [
                 "type",
                 "read"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "progress": {
+                  "$ref": "#/schemas/success_response/$defs/PaneProgressResult"
+                },
+                "type": {
+                  "const": "pane_progress",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "progress"
               ],
               "type": "object"
             },

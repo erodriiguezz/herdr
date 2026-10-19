@@ -475,6 +475,84 @@ crate::cli::projection::cli_params! {
     }
 }
 
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgressStatus {
+    #[default]
+    Pending,
+    InProgress,
+    Completed,
+    /// Any status this server does not recognise; treated as pending.
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ProgressItem {
+    /// Stable identifier used by `pane.update_progress`; optional for full reports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub text: String,
+    #[serde(default)]
+    pub status: ProgressStatus,
+}
+
+crate::cli::projection::cli_params! {
+    /// Replaces the pane's agent progress checklist. An empty `items` list clears it.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+    pub struct PaneReportProgressParams => PaneReportProgressProjection {
+        pub pane_id: String => Field::new(String::new()).input(binding::pane_id()),
+        pub source: String => Field::new(String::new()).input(binding::source()),
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub agent: Option<String> => Field::new(None).input(binding::optional_text("agent", "LABEL")),
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub seq: Option<u64> => Field::new(None).input(binding::number("seq", "N")),
+        pub items: Vec<ProgressItem> => Field::new(Vec::new()).input(binding::progress_items().required()),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgressUpdateStatus {
+    Pending,
+    InProgress,
+    Completed,
+    /// Removes the item.
+    Deleted,
+    /// Any status this server does not recognise; treated as no status change.
+    #[serde(other)]
+    Unknown,
+}
+
+crate::cli::projection::cli_params! {
+    /// Upserts one checklist item by id. `deleted` removes it; an unknown id
+    /// without a `subject` is ignored.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+    pub struct PaneUpdateProgressParams => PaneUpdateProgressProjection {
+        pub pane_id: String => Field::new(String::new()).input(binding::pane_id()),
+        pub source: String => Field::new(String::new()).input(binding::source()),
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub agent: Option<String> => Field::new(None).input(binding::optional_text("agent", "LABEL")),
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub seq: Option<u64> => Field::new(None).input(binding::number("seq", "N")),
+        pub id: String => Field::new(String::new()).input(binding::text("id", "ID").required()),
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub subject: Option<String> => Field::new(None).input(binding::optional_text("subject", "TEXT")),
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub status: Option<ProgressUpdateStatus> => Field::new(None).input(binding::progress_status()),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneProgressResult {
+    pub pane_id: String,
+    pub items: Vec<ProgressItem>,
+    pub done: usize,
+    pub total: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PaneClearAgentAuthorityParams {
     pub pane_id: String,

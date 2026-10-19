@@ -368,7 +368,7 @@ The expanded desktop sidebar renders each inner array in `rows` as one line. The
 row_gap = 0
 rows = [
   ["state_icon", "machine", "workspace", "tab"],
-  ["agent"],
+  ["agent", "$progress"],
 ]
 
 [ui.sidebar.spaces]
@@ -453,7 +453,7 @@ claude = [
 ]
 ```
 
-An override replaces `rows`; it does not extend it. Override keys are case-sensitive canonical agent IDs such as `claude`, `codex`, and `pi`. Detection aliases such as `claude-code` are not accepted. Agents without an override, including custom reported agents, use `rows`.
+`$progress` shows the pane's agent checklist as `done/total` (for example `3/7`) and disappears when no checklist is set; see [`pane.report_progress`](/docs/socket-api/). An override replaces `rows`; it does not extend it. Override keys are case-sensitive canonical agent IDs such as `claude`, `codex`, and `pi`. Detection aliases such as `claude-code` are not accepted. Agents without an override, including custom reported agents, use `rows`.
 
 Custom `$name` tokens are dynamic values, not literal text. Add the token to a layout, then report its value from a script or plugin:
 

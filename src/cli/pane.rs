@@ -43,6 +43,13 @@ pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
     match leaf.output {
         bindings::Output::Json => super::print_response(&response),
         bindings::Output::Read => super::print_read_response(&response),
+        bindings::Output::Progress => {
+            if leaf.json_flag(&args[1..]) {
+                super::print_response(&response)
+            } else {
+                print_progress_response(&response)
+            }
+        }
         bindings::Output::Quiet => {
             if response.get("error").is_some() {
                 super::print_response(&response)
@@ -51,6 +58,32 @@ pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
             }
         }
     }
+}
+
+fn progress_mark(status: &str) -> &'static str {
+    match status {
+        "completed" => "\u{2713}",
+        "in_progress" => "\u{25b8}",
+        _ => "\u{2610}",
+    }
+}
+
+fn format_progress(result: &serde_json::Value) -> String {
+    let mut out = String::new();
+    for item in result["items"].as_array().into_iter().flatten() {
+        let status = item["status"].as_str().unwrap_or("pending");
+        let text = item["text"].as_str().unwrap_or_default();
+        out.push_str(&format!("{} {text}\n", progress_mark(status)));
+    }
+    out
+}
+
+fn print_progress_response(response: &serde_json::Value) -> std::io::Result<i32> {
+    if response.get("error").is_some() {
+        return super::print_response(response);
+    }
+    print!("{}", format_progress(&response["result"]["progress"]));
+    Ok(0)
 }
 
 fn last_index(matches: &ArgMatches, names: &[&str]) -> Option<usize> {
@@ -406,11 +439,32 @@ mod tests {
                 json!({"pane_id": "pane", "source": "hook", "agent": "a"}),
             ),
             (
+                "progress",
+                vec!["pane"],
+                "cli:pane:progress",
+                "pane.progress",
+                json!({"pane_id": "pane"}),
+            ),
+            (
                 "report-metadata",
                 vec!["pane", "--source", " hook ", "--clear-title"],
                 "cli:request",
                 "pane.report_metadata",
                 json!({"pane_id": "pane", "source": "hook", "clear_title": true, "clear_display_agent": false, "clear_state_labels": false}),
+            ),
+            (
+                "report-progress",
+                vec!["pane", "--source", "s", "--items-json", "[]"],
+                "cli:request",
+                "pane.report_progress",
+                json!({"pane_id": "pane", "source": "s", "items": []}),
+            ),
+            (
+                "update-progress",
+                vec!["pane", "--source", "s", "--id", "1"],
+                "cli:request",
+                "pane.update_progress",
+                json!({"pane_id": "pane", "source": "s", "id": "1"}),
             ),
         ];
         assert_eq!(cases.len(), bindings::LEAVES.len());
@@ -421,6 +475,36 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    // AC-1.1
+    #[test]
+    fn progress_text_uses_status_marks_in_order() {
+        let result = serde_json::json!({"items": [
+            {"text": "write tests", "status": "completed"},
+            {"text": "write code", "status": "in_progress"},
+            {"text": "ship", "status": "pending"},
+            {"text": "mystery", "status": "unknown"},
+        ], "done": 1, "total": 4});
+        assert_eq!(
+            format_progress(&result),
+            "\u{2713} write tests\n\u{25b8} write code\n\u{2610} ship\n\u{2610} mystery\n"
+        );
+        assert_eq!(
+            format_progress(&serde_json::json!({"items": [], "done": 0, "total": 0})),
+            ""
+        );
+    }
+
+    // AC-1.1
+    #[test]
+    fn progress_command_accepts_json_flag() {
+        let leaf = bindings::LEAVES
+            .iter()
+            .find(|leaf| leaf.name == "progress")
+            .unwrap();
+        let request = leaf.request(&args(&["pane", "--json"])).unwrap();
+        assert!(matches!(request.method, Method::PaneProgress(_)));
     }
 
     #[test]
@@ -1004,6 +1088,116 @@ mod tests {
         .is_err());
     }
 
+    // AC-1.8
+    #[test]
+    fn progress_report_leaves_build_api_requests() {
+        let json = serde_json::to_value(
+            request(
+                "update-progress",
+                &[
+                    "w1:p1",
+                    "--source",
+                    " herdr:claude ",
+                    "--agent",
+                    "claude",
+                    "--id",
+                    "2",
+                    "--subject",
+                    "B",
+                    "--status",
+                    "in_progress",
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["method"], "pane.update_progress");
+        assert_eq!(
+            json["params"],
+            serde_json::json!({
+                "pane_id": "w1:p1", "source": "herdr:claude", "agent": "claude",
+                "id": "2", "subject": "B", "status": "in_progress"
+            })
+        );
+        let json = serde_json::to_value(
+            request(
+                "update-progress",
+                &[
+                    "w1:p1", "--source", "s", "--id", "3", "--status", "deleted", "--seq", "7",
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["params"]["status"], "deleted");
+        assert_eq!(json["params"]["seq"], 7);
+        assert!(json["params"].get("subject").is_none());
+        assert!(request("update-progress", &["w1:p1", "--source", "s"]).is_err());
+        assert!(request(
+            "update-progress",
+            &["w1:p1", "--source", "s", "--id", "1", "--status", "bogus"]
+        )
+        .is_err());
+
+        let json = serde_json::to_value(
+            request(
+                "report-progress",
+                &[
+                    "w1:p1",
+                    "--source",
+                    "s",
+                    "--seq",
+                    "9",
+                    "--items-json",
+                    r#"[{"id":"1","text":"A","status":"completed"},{"text":"B"}]"#,
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["method"], "pane.report_progress");
+        assert_eq!(
+            json["params"]["items"],
+            serde_json::json!([
+                {"id": "1", "text": "A", "status": "completed"},
+                {"text": "B", "status": "pending"}
+            ])
+        );
+        let json = serde_json::to_value(
+            request(
+                "report-progress",
+                &["w1:p1", "--source", "s", "--items-json", "[]"],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["params"]["items"], serde_json::json!([]));
+        assert!(request("report-progress", &["w1:p1", "--source", "s"]).is_err());
+        assert!(request(
+            "report-progress",
+            &["w1:p1", "--source", "s", "--items-json", "{oops"]
+        )
+        .is_err());
+        assert!(request(
+            "report-progress",
+            &["w1:p1", "--source", "s", "--items-json", r#"[{"id":"1"}]"#]
+        )
+        .is_err());
+    }
+
+    // AC-1.1
+    #[test]
+    fn progress_json_flag_is_read_from_parsed_arguments() {
+        let leaf = bindings::LEAVES
+            .iter()
+            .find(|leaf| leaf.name == "progress")
+            .unwrap();
+        assert!(leaf.json_flag(&args(&["pane", "--json"])));
+        assert!(!leaf.json_flag(&args(&["pane"])));
+        // A pane id that merely spells the flag is not the flag.
+        assert!(!leaf.json_flag(&args(&["--", "--json"])));
+    }
+
     #[test]
     fn pane_projection_help_and_invalid_syntax_do_not_use_transport() {
         for leaf in bindings::LEAVES {
@@ -1022,6 +1216,8 @@ mod tests {
             "report-agent-session",
             "release-agent",
             "report-metadata",
+            "report-progress",
+            "update-progress",
         ] {
             assert_eq!(run_pane_command(&args(&[name])).unwrap(), 2);
         }

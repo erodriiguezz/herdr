@@ -5,7 +5,8 @@ use clap::{ArgMatches, Command};
 use crate::api::schema::panes::*;
 use crate::api::schema::{
     Method, OutputMatch, PaneAgentState, PaneDirection, PaneTarget, PaneWaitForOutputParams,
-    ReadFormat, ReadSource, Request, SplitDirection, READ_FORMATS, READ_SOURCES,
+    ProgressItem, ProgressUpdateStatus, ReadFormat, ReadSource, Request, SplitDirection,
+    READ_FORMATS, READ_SOURCES,
 };
 pub(crate) use crate::cli::projection::parse_choice;
 use crate::cli::projection::{choices, choices_where, Choice};
@@ -30,6 +31,30 @@ const STATES: &[Choice<PaneAgentState>] = &[
     Choice::new("blocked", PaneAgentState::Blocked),
     Choice::new("unknown", PaneAgentState::Unknown),
 ];
+
+const PROGRESS_STATUSES: &[Choice<ProgressUpdateStatus>] = &[
+    Choice::new("pending", ProgressUpdateStatus::Pending),
+    Choice::new("in_progress", ProgressUpdateStatus::InProgress),
+    Choice::new("completed", ProgressUpdateStatus::Completed),
+    Choice::new("deleted", ProgressUpdateStatus::Deleted),
+];
+
+pub(crate) fn progress_status() -> Input<Option<ProgressUpdateStatus>> {
+    Input::value("status", "STATUS", |slot, value| {
+        *slot = Some(parse_choice(PROGRESS_STATUSES, "progress status", value)?);
+        Ok(())
+    })
+    .configure(|arg| choices(arg, PROGRESS_STATUSES))
+}
+
+/// JSON array of `{"id"?, "text", "status"?}` objects.
+pub(crate) fn progress_items() -> Input<Vec<ProgressItem>> {
+    Input::value("items-json", "JSON", |slot, value| {
+        *slot = serde_json::from_str(value)
+            .map_err(|error| ParseError::Usage(format!("invalid --items-json: {error}")))?;
+        Ok(())
+    })
+}
 
 pub(crate) fn state() -> Input<PaneAgentState> {
     Input::value("state", "STATE", |slot, value| {
@@ -387,6 +412,8 @@ pub(super) enum Output {
     Json,
     Quiet,
     Read,
+    /// Checklist text by default; the raw JSON response with `--json`.
+    Progress,
 }
 
 pub(super) struct Leaf {
@@ -404,11 +431,27 @@ impl Leaf {
         match self.name {
             "input" => command.group(clap::ArgGroup::new("selector").args(["pane_id", "pane", "current"]).required(true)),
             "move" => command.group(clap::ArgGroup::new("destination").args(["tab", "new-tab", "new-workspace"]).required(true)),
+            "progress" => command.arg(
+                clap::Arg::new("json")
+                    .long("json")
+                    .action(clap::ArgAction::SetTrue)
+                    .help("Print the JSON response instead of the checklist"),
+            ),
             "send-text" => command.after_help("next: herdr pane run <PANE_ID> <COMMAND> sends text and Enter in one call"),
             "send-keys" => command.after_help("Use esc as the canonical Escape key name; escape is also accepted."),
             "wait-output" => command.after_help("The selected snapshot is searched immediately, including existing output, then polled. Without --timeout, this waits indefinitely."),
             _ => command,
         }
+    }
+
+    /// Whether the already-validated `args` set the `--json` flag.
+    pub(super) fn json_flag(&self, args: &[String]) -> bool {
+        self.command()
+            .no_binary_name(true)
+            .try_get_matches_from(args)
+            .is_ok_and(|matches| {
+                matches.try_get_one::<bool>("json").ok().flatten().copied() == Some(true)
+            })
     }
 
     pub(super) fn request(&self, args: &[String]) -> Result<Request, ParseError> {
@@ -644,6 +687,38 @@ pub(super) const LEAVES: &[Leaf] = &[
         output: Output::Json,
         arguments: PaneMoveProjection::arguments,
         method: super::move_pane,
+    },
+    Leaf {
+        name: "progress",
+        about: "Show the agent progress checklist of a pane",
+        id: "cli:pane:progress",
+        output: Output::Progress,
+        arguments: PaneTargetProjection::arguments,
+        method: |matches| PaneTargetProjection::from_matches(matches).map(Method::PaneProgress),
+    },
+    Leaf {
+        name: "report-progress",
+        about: "Replace the pane agent progress checklist",
+        id: "cli:request",
+        output: Output::Quiet,
+        arguments: PaneReportProgressProjection::arguments,
+        method: |matches| {
+            let mut params = PaneReportProgressProjection::from_matches(matches)?;
+            params.source = super::source(params.source)?;
+            Ok(Method::PaneReportProgress(params))
+        },
+    },
+    Leaf {
+        name: "update-progress",
+        about: "Add or change one item of the pane agent progress checklist",
+        id: "cli:request",
+        output: Output::Quiet,
+        arguments: PaneUpdateProgressProjection::arguments,
+        method: |matches| {
+            let mut params = PaneUpdateProgressProjection::from_matches(matches)?;
+            params.source = super::source(params.source)?;
+            Ok(Method::PaneUpdateProgress(params))
+        },
     },
     leaf!(
         "close",

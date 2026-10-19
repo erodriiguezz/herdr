@@ -124,6 +124,9 @@ operations::define_operations! {
     PaneReportAgent(PaneReportAgentParams) => "pane.report_agent", true, false;
     PaneReportAgentSession(PaneReportAgentSessionParams) => "pane.report_agent_session", true, false;
     PaneReportMetadata(PaneReportMetadataParams) => "pane.report_metadata", true, false;
+    PaneReportProgress(PaneReportProgressParams) => "pane.report_progress", true, false;
+    PaneUpdateProgress(PaneUpdateProgressParams) => "pane.update_progress", true, false;
+    PaneProgress(PaneTarget) => "pane.progress", false, false;
     PaneClearAgentAuthority(PaneClearAgentAuthorityParams) => "pane.clear_agent_authority", true, false;
     PaneReleaseAgent(PaneReleaseAgentParams) => "pane.release_agent", true, false;
     PaneClose(PaneTarget) => "pane.close", true, true;

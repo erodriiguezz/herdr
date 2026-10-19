@@ -18,6 +18,16 @@ use super::config_edit::{
 // `new`/`load`; filter before it starts an unnecessary hook process.
 const SESSION_START_MATCHER: &str = "^(startup|resume|clear|compact|fork)$";
 
+// Claude's task tools report one change per call; the hook forwards them so
+// herdr can keep a per-pane checklist.
+const PROGRESS_MATCHER: &str = "TaskCreate|TaskUpdate|TaskList";
+
+// Removed on uninstall only: install must not churn the progress hook.
+const PROGRESS_REMOVAL: HookRemoval = HookRemoval {
+    event: "PostToolUse",
+    actions: &["progress"],
+};
+
 struct HookRemoval {
     event: &'static str,
     actions: &'static [&'static str],
@@ -80,18 +90,35 @@ pub(crate) fn install(content: &str, settings_path: &Path, hook_path: &Path) -> 
         10,
         Some(SESSION_START_MATCHER),
     )?;
+    let with_session = desired.clone();
+    ensure_command_hook(
+        ensure_hooks_object(
+            &mut desired,
+            settings_path,
+            "claude settings",
+            "claude settings hooks",
+        )?,
+        "PostToolUse",
+        hook_command(hook_path, Some("progress")),
+        10,
+        Some(PROGRESS_MATCHER),
+    )?;
 
     if desired == original {
         return Ok(content.to_string());
     }
 
-    rewrite(
+    let updated = rewrite(
         content,
         settings_path,
         hook_path,
         EditKind::Install,
-        &desired,
-    )
+        &with_session,
+    )?;
+    if with_session == desired {
+        return Ok(updated);
+    }
+    add_progress_hook(&updated, settings_path, hook_path, &desired)
 }
 
 pub(crate) fn uninstall(
@@ -131,7 +158,7 @@ fn apply_value_removals(
     canonical: Option<&Value>,
 ) -> io::Result<bool> {
     let mut removed = false;
-    for policy in HOOK_REMOVALS {
+    for policy in removals(canonical.is_none()) {
         let commands = removal_commands(policy, hook_path);
         removed |= remove_value_event_commands(
             hooks,
@@ -239,7 +266,7 @@ fn rewrite(
 
     let canonical = canonical_hook_value(hook_path);
     let mut canonical_preserved = false;
-    for policy in HOOK_REMOVALS {
+    for policy in removals(kind == EditKind::Uninstall) {
         let commands = removal_commands(policy, hook_path);
         canonical_preserved |= remove_event_commands(
             &hooks,
@@ -339,6 +366,12 @@ fn remove_event_commands(
     Ok(canonical_preserved)
 }
 
+fn removals(uninstalling: bool) -> impl Iterator<Item = &'static HookRemoval> {
+    HOOK_REMOVALS
+        .iter()
+        .chain(uninstalling.then_some(&PROGRESS_REMOVAL))
+}
+
 fn removal_commands(policy: &HookRemoval, hook_path: &Path) -> Vec<String> {
     policy
         .actions
@@ -368,6 +401,106 @@ fn canonical_hook_input(hook_path: &Path) -> CstInputValue {
             timeout: 10u64,
         }],
     })
+}
+
+/// Second install pass: adds the `PostToolUse` progress hook to settings that
+/// already carry the SessionStart hook, preserving untouched formatting.
+fn add_progress_hook(
+    content: &str,
+    settings_path: &Path,
+    hook_path: &Path,
+    desired: &Value,
+) -> io::Result<String> {
+    let command = hook_command(hook_path, Some("progress"));
+    if parse_value(content, settings_path)?
+        .pointer("/hooks/PostToolUse")
+        .and_then(Value::as_array)
+        .is_some_and(|entries| {
+            entries.iter().any(|entry| {
+                entry
+                    .get("hooks")
+                    .and_then(Value::as_array)
+                    .is_some_and(|hooks| {
+                        hooks.iter().any(|hook| {
+                            hook.get("type").and_then(Value::as_str) == Some("command")
+                                && hook.get("command").and_then(Value::as_str)
+                                    == Some(command.as_str())
+                        })
+                    })
+            })
+        })
+    {
+        return Ok(content.to_string());
+    }
+
+    let root = CstRootNode::parse(content, &strict_parse_options()).map_err(|err| {
+        io::Error::other(format!(
+            "failed to parse {}: {err}",
+            settings_path.display()
+        ))
+    })?;
+    let hooks = root
+        .value()
+        .and_then(|value| value.as_object())
+        .and_then(|root| root.get("hooks"))
+        .and_then(|property| property.object_value())
+        .ok_or_else(|| io::Error::other("claude settings hooks must be a JSON object"))?;
+
+    match hooks.get("PostToolUse") {
+        Some(property) => {
+            let entries = property
+                .array_value()
+                .ok_or_else(|| io::Error::other("hook entries for PostToolUse must be an array"))?;
+            if direct_children_are_compact(&entries.children()) {
+                let ast = parse_ast_root_object(content, settings_path)?;
+                let array = ast
+                    .get_object("hooks")
+                    .and_then(|hooks| hooks.get_array("PostToolUse"))
+                    .ok_or_else(|| {
+                        io::Error::other("hook entries for PostToolUse must be an array")
+                    })?;
+                let updated = append_array_element(content, array, &progress_hook_json(hook_path)?);
+                return verify_updated(updated, settings_path, desired);
+            }
+            entries.append(progress_hook_input(hook_path));
+        }
+        None if direct_children_are_compact(&hooks.children()) => {
+            let ast = parse_ast_root_object(content, settings_path)?;
+            let hooks = ast
+                .get_object("hooks")
+                .ok_or_else(|| io::Error::other("claude settings hooks must be a JSON object"))?;
+            let value = format!("[{}]", progress_hook_json(hook_path)?);
+            let updated = append_object_property(content, hooks, "PostToolUse", &value);
+            return verify_updated(updated, settings_path, desired);
+        }
+        None => {
+            let entries = hooks
+                .append("PostToolUse", CstInputValue::Array(Vec::new()))
+                .array_value()
+                .ok_or_else(|| io::Error::other("failed to create PostToolUse hook array"))?;
+            entries.append(progress_hook_input(hook_path));
+        }
+    }
+    verify_updated(root.to_string(), settings_path, desired)
+}
+
+fn progress_hook_input(hook_path: &Path) -> CstInputValue {
+    let command = hook_command(hook_path, Some("progress"));
+    json!({
+        matcher: PROGRESS_MATCHER,
+        hooks: [{
+            "type": "command",
+            command: command,
+            timeout: 10u64,
+        }],
+    })
+}
+
+fn progress_hook_json(hook_path: &Path) -> io::Result<String> {
+    let command = serde_json::to_string(&hook_command(hook_path, Some("progress")))?;
+    Ok(format!(
+        "{{\"matcher\":\"{PROGRESS_MATCHER}\",\"hooks\":[{{\"type\":\"command\",\"command\":{command},\"timeout\":10}}]}}"
+    ))
 }
 
 fn append_hooks_property_compact(
@@ -635,47 +768,93 @@ mod tests {
     fn install_keeps_compact_containers_compact() {
         let (settings_path, hook_path) = paths();
         let canonical = canonical_hook_json(hook_path).unwrap();
+        let progress = progress_hook_json(hook_path).unwrap();
         let cases = [
             (
                 "{\"zeta\":{\"escaped\":\"\\u0061\",\"n\":1e+02},\"alpha\":1}\r\n",
                 format!(
-                    "{{\"zeta\":{{\"escaped\":\"\\u0061\",\"n\":1e+02}},\"alpha\":1,\"hooks\":{{\"SessionStart\":[{canonical}]}}}}\r\n"
+                    "{{\"zeta\":{{\"escaped\":\"\\u0061\",\"n\":1e+02}},\"alpha\":1,\"hooks\":{{\"SessionStart\":[{canonical}],\"PostToolUse\":[{progress}]}}}}\r\n"
                 ),
             ),
             (
                 "{\"hooks\":{\"Notification\":[{\"matcher\":\"keep\",\"hooks\":[]}]}, \"alpha\":1}",
                 format!(
-                    "{{\"hooks\":{{\"Notification\":[{{\"matcher\":\"keep\",\"hooks\":[]}}],\"SessionStart\":[{canonical}]}}, \"alpha\":1}}"
+                    "{{\"hooks\":{{\"Notification\":[{{\"matcher\":\"keep\",\"hooks\":[]}}],\"SessionStart\":[{canonical}],\"PostToolUse\":[{progress}]}}, \"alpha\":1}}"
                 ),
             ),
             (
                 "{\"hooks\":{\"SessionStart\":[{\"matcher\":\"keep\",\"hooks\":[{\"type\":\"command\",\"command\":\"echo keep\"}]}]}}",
                 format!(
-                    "{{\"hooks\":{{\"SessionStart\":[{{\"matcher\":\"keep\",\"hooks\":[{{\"type\":\"command\",\"command\":\"echo keep\"}}]}},{canonical}]}}}}"
+                    "{{\"hooks\":{{\"SessionStart\":[{{\"matcher\":\"keep\",\"hooks\":[{{\"type\":\"command\",\"command\":\"echo keep\"}}]}},{canonical}],\"PostToolUse\":[{progress}]}}}}"
                 ),
             ),
             (
                 "{\"zeta\":{\n  \"x\":1\n},\"alpha\":1}",
                 format!(
-                    "{{\"zeta\":{{\n  \"x\":1\n}},\"alpha\":1,\"hooks\":{{\"SessionStart\":[{canonical}]}}}}"
+                    "{{\"zeta\":{{\n  \"x\":1\n}},\"alpha\":1,\"hooks\":{{\"SessionStart\":[{canonical}],\"PostToolUse\":[{progress}]}}}}"
                 ),
             ),
             (
                 "{\"hooks\":{\"Notification\":[\n  {\"matcher\":\"keep\",\"hooks\":[]}\n]},\"alpha\":1}",
                 format!(
-                    "{{\"hooks\":{{\"Notification\":[\n  {{\"matcher\":\"keep\",\"hooks\":[]}}\n],\"SessionStart\":[{canonical}]}},\"alpha\":1}}"
+                    "{{\"hooks\":{{\"Notification\":[\n  {{\"matcher\":\"keep\",\"hooks\":[]}}\n],\"SessionStart\":[{canonical}],\"PostToolUse\":[{progress}]}},\"alpha\":1}}"
                 ),
             ),
             (
                 "{\"hooks\":{\"SessionStart\":[{\n  \"matcher\":\"keep\",\n  \"hooks\":[{\"type\":\"command\",\"command\":\"echo keep\"}]\n}]}}",
                 format!(
-                    "{{\"hooks\":{{\"SessionStart\":[{{\n  \"matcher\":\"keep\",\n  \"hooks\":[{{\"type\":\"command\",\"command\":\"echo keep\"}}]\n}},{canonical}]}}}}"
+                    "{{\"hooks\":{{\"SessionStart\":[{{\n  \"matcher\":\"keep\",\n  \"hooks\":[{{\"type\":\"command\",\"command\":\"echo keep\"}}]\n}},{canonical}],\"PostToolUse\":[{progress}]}}}}"
                 ),
             ),
         ];
 
         for (input, expected) in cases {
             assert_eq!(install(input, settings_path, hook_path).unwrap(), expected);
+        }
+    }
+
+    // AC-1.8
+    #[test]
+    fn install_adds_progress_hook_once_and_uninstall_removes_it() {
+        let (settings_path, hook_path) = paths();
+        let inputs = [
+            "{}",
+            "{\"hooks\":{\"PostToolUse\":[{\"matcher\":\"Bash\",\"hooks\":[{\"type\":\"command\",\"command\":\"echo keep\"}]}]}}",
+            "{\n  \"hooks\": {\n    \"PostToolUse\": [\n      {\"matcher\": \"Bash\", \"hooks\": [{\"type\": \"command\", \"command\": \"echo keep\"}]}\n    ],\n    \"Notification\": []\n  }\n}\n",
+            "{\n  \"model\": \"x\"\n}\n",
+        ];
+        let progress_command = hook_command(hook_path, Some("progress"));
+        for input in inputs {
+            let first = install(input, settings_path, hook_path).unwrap();
+            let settings: Value = serde_json::from_str(&first).unwrap();
+            let entries = settings["hooks"]["PostToolUse"].as_array().unwrap();
+            let owned: Vec<&Value> = entries
+                .iter()
+                .filter(|entry| entry["hooks"][0]["command"] == progress_command.as_str())
+                .collect();
+            assert_eq!(owned.len(), 1, "input: {input}");
+            assert_eq!(owned[0]["matcher"], PROGRESS_MATCHER);
+            assert_eq!(owned[0]["hooks"][0]["timeout"], 10);
+            assert_eq!(
+                settings["hooks"]["SessionStart"].as_array().unwrap().len(),
+                1
+            );
+
+            let second = install(&first, settings_path, hook_path).unwrap();
+            assert_eq!(second, first, "re-install must be a byte-exact no-op");
+
+            let removed = uninstall(&first, settings_path, hook_path).unwrap();
+            let settings: Value = serde_json::from_str(&removed).unwrap();
+            let remaining = settings["hooks"]
+                .get("PostToolUse")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            assert_eq!(
+                remaining,
+                usize::from(input.contains("echo keep")),
+                "input: {input}"
+            );
+            assert!(settings["hooks"].get("SessionStart").is_none());
         }
     }
 
@@ -701,8 +880,9 @@ mod tests {
     fn install_is_a_byte_exact_noop_for_a_canonical_hook() {
         let (settings_path, hook_path) = paths();
         let command = serde_json::to_string(&hook_command(hook_path, Some("session"))).unwrap();
+        let progress = progress_hook_json(hook_path).unwrap();
         let input = format!(
-            "{{\"hooks\":{{\"SessionStart\":[{{\"hooks\":[{{\"timeout\":10,\"command\":{command},\"type\":\"command\"}}],\"matcher\":\"{SESSION_START_MATCHER}\"}}]}},\"escaped\":\"\\u0061\"}}  \r\n\r\n"
+            "{{\"hooks\":{{\"SessionStart\":[{{\"hooks\":[{{\"timeout\":10,\"command\":{command},\"type\":\"command\"}}],\"matcher\":\"{SESSION_START_MATCHER}\"}}],\"PostToolUse\":[{progress}]}},\"escaped\":\"\\u0061\"}}  \r\n\r\n"
         );
 
         let updated = install(&input, settings_path, hook_path).unwrap();
@@ -758,7 +938,15 @@ mod tests {
         ]
         .concat();
         let input = ["{\"hooks\":{", &session_start, ",", &old_event, "}}"].concat();
-        let expected = ["{\"hooks\":{", &session_start, "}}"].concat();
+        let progress = progress_hook_json(hook_path).unwrap();
+        let expected = [
+            "{\"hooks\":{",
+            &session_start,
+            ",\"PostToolUse\":[",
+            &progress,
+            "]}}",
+        ]
+        .concat();
 
         let updated = install(&input, settings_path, hook_path).unwrap();
 
