@@ -47,11 +47,35 @@ if ($Action -eq "progress") {
         if ($value -is [int] -or $value -is [long] -or $value -is [double]) { return "$value" }
         return $null
     }
-    # Windows PowerShell 5.1 and PowerShell < 7.3 drop embedded double quotes
-    # from native arguments unless they are escaped by hand.
+    # Windows PowerShell 5.1 and PowerShell < 7.3 pass native arguments through
+    # unmodified, so quote them by hand with the MSVCRT rules that herdr's
+    # argument parser undoes: backslashes are literal unless they precede a
+    # double quote (or the closing quote), where they are doubled. PowerShell
+    # 7.3+ quotes correctly itself. The same algorithm is checked by the
+    # reference implementation in herdr-agent-state.test.ts (this script itself
+    # is not executed by any test).
     function Format-NativeArg([string]$value) {
-        if ($null -eq $PSNativeCommandArgumentPassing) { return $value.Replace('"', '\"') }
-        return $value
+        if ($null -ne $PSNativeCommandArgumentPassing) { return $value }
+        if ($value.Length -gt 0 -and $value.IndexOfAny([char[]]@(" ", "`t", '"')) -lt 0) { return $value }
+        $quoted = New-Object System.Text.StringBuilder
+        [void]$quoted.Append('"')
+        $backslashes = 0
+        foreach ($char in $value.ToCharArray()) {
+            if ($char -eq [char]92) {
+                $backslashes++
+                continue
+            }
+            if ($char -eq [char]34) {
+                [void]$quoted.Append([string]::new([char]92, $backslashes * 2 + 1))
+            } elseif ($backslashes -gt 0) {
+                [void]$quoted.Append([string]::new([char]92, $backslashes))
+            }
+            [void]$quoted.Append($char)
+            $backslashes = 0
+        }
+        if ($backslashes -gt 0) { [void]$quoted.Append([string]::new([char]92, $backslashes * 2)) }
+        [void]$quoted.Append('"')
+        return $quoted.ToString()
     }
     $statuses = @("pending", "in_progress", "completed", "deleted")
     try {

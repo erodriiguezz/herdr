@@ -44,7 +44,7 @@ pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
         bindings::Output::Json => super::print_response(&response),
         bindings::Output::Read => super::print_read_response(&response),
         bindings::Output::Progress => {
-            if args.iter().any(|arg| arg == "--json") {
+            if leaf.json_flag(&args[1..]) {
                 super::print_response(&response)
             } else {
                 print_progress_response(&response)
@@ -1183,6 +1183,19 @@ mod tests {
             &["w1:p1", "--source", "s", "--items-json", r#"[{"id":"1"}]"#]
         )
         .is_err());
+    }
+
+    // AC-1.1
+    #[test]
+    fn progress_json_flag_is_read_from_parsed_arguments() {
+        let leaf = bindings::LEAVES
+            .iter()
+            .find(|leaf| leaf.name == "progress")
+            .unwrap();
+        assert!(leaf.json_flag(&args(&["pane", "--json"])));
+        assert!(!leaf.json_flag(&args(&["pane"])));
+        // A pane id that merely spells the flag is not the flag.
+        assert!(!leaf.json_flag(&args(&["--", "--json"])));
     }
 
     #[test]

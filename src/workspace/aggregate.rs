@@ -40,7 +40,7 @@ impl Tab {
                     state: terminal.state,
                     seen: pane.seen,
                     last_agent_state_change_seq: terminal.last_agent_state_change_seq,
-                    tokens: terminal.metadata_tokens.values(),
+                    tokens: terminal.display_tokens(),
                 })
             })
             .collect()
@@ -177,5 +177,38 @@ mod tests {
 
         assert_eq!(ws.tabs[1].number, 3);
         assert_eq!(survivor.tab_idx, 1);
+    }
+
+    // AC-1.2
+    #[test]
+    fn pane_details_carry_the_derived_progress_token() {
+        use crate::api::schema::{ProgressItem, ProgressStatus};
+        let ws = Workspace::test_new("test");
+        let pane = ws.tabs[0].root_pane;
+        let mut terminal = terminal_for_pane(&ws, pane);
+        terminal.detected_agent = Some(Agent::Codex);
+        let item = |status| ProgressItem {
+            id: None,
+            text: "step".into(),
+            status,
+        };
+        terminal
+            .report_progress(
+                "s",
+                None,
+                vec![
+                    item(ProgressStatus::Completed),
+                    item(ProgressStatus::Pending),
+                ],
+            )
+            .unwrap();
+        let mut terminals = HashMap::new();
+        terminals.insert(terminal.id.clone(), terminal);
+
+        let details = ws.pane_details(&terminals);
+        assert_eq!(
+            details[0].tokens.get("progress").map(String::as_str),
+            Some("1/2")
+        );
     }
 }

@@ -15,6 +15,8 @@ pub struct AgentProgress {
     pub items: Vec<ProgressItem>,
     pub done: usize,
     pub total: usize,
+    /// Cached `done/total` shown as the `progress` token.
+    pub summary: String,
     pub source: String,
     pub last_seq: Option<u64>,
 }
@@ -56,7 +58,7 @@ impl ProgressSlot {
     pub fn summary(&self) -> Option<String> {
         self.current
             .as_ref()
-            .map(|progress| format!("{}/{}", progress.done, progress.total))
+            .map(|progress| progress.summary.clone())
     }
 }
 
@@ -97,6 +99,7 @@ fn assemble(source: &str, seq: Option<u64>, items: Vec<ProgressItem>) -> Option<
         .filter(|item| item.status == ProgressStatus::Completed)
         .count();
     Some(AgentProgress {
+        summary: format!("{done}/{}", items.len()),
         total: items.len(),
         done,
         items,

@@ -444,6 +444,16 @@ impl Leaf {
         }
     }
 
+    /// Whether the already-validated `args` set the `--json` flag.
+    pub(super) fn json_flag(&self, args: &[String]) -> bool {
+        self.command()
+            .no_binary_name(true)
+            .try_get_matches_from(args)
+            .is_ok_and(|matches| {
+                matches.try_get_one::<bool>("json").ok().flatten().copied() == Some(true)
+            })
+    }
+
     pub(super) fn request(&self, args: &[String]) -> Result<Request, ParseError> {
         let mut method = projection::parse(
             self.command().bin_name(format!("herdr pane {}", self.name)),

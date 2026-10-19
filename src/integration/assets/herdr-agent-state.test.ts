@@ -826,3 +826,66 @@ test("Claude progress hook forwards subagent calls and ignores malformed or unre
   expect(requests).toHaveLength(1);
   expect(requests[0].params).toMatchObject({ id: "9", status: "completed" });
 });
+
+// Reference implementation of Format-NativeArg in claude/herdr-agent-state.ps1
+// (legacy Windows PowerShell argument quoting). The .ps1 itself is not executed
+// here: this checks that the algorithm round-trips through MSVCRT argv parsing.
+function quoteNativeArg(value: string): string {
+  if (value.length > 0 && !/[ \t"]/.test(value)) return value;
+  let out = '"';
+  let backslashes = 0;
+  for (const char of value) {
+    if (char === "\\") {
+      backslashes += 1;
+      continue;
+    }
+    if (char === '"') out += "\\".repeat(backslashes * 2 + 1);
+    else if (backslashes > 0) out += "\\".repeat(backslashes);
+    out += char;
+    backslashes = 0;
+  }
+  out += "\\".repeat(backslashes * 2);
+  return `${out}"`;
+}
+
+// MSVCRT command-line splitting for a single argument.
+function parseNativeArg(text: string): string {
+  let out = "";
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i += 1) {
+    let backslashes = 0;
+    while (text[i] === "\\") {
+      backslashes += 1;
+      i += 1;
+    }
+    if (text[i] === '"') {
+      out += "\\".repeat(Math.floor(backslashes / 2));
+      if (backslashes % 2 === 1) out += '"';
+      else inQuotes = !inQuotes;
+    } else {
+      out += "\\".repeat(backslashes);
+      if (i < text.length) out += text[i];
+    }
+  }
+  expect(inQuotes).toBe(false);
+  return out;
+}
+
+test("legacy native argument quoting round-trips through MSVCRT parsing", () => {
+  const table: Array<[string, string]> = [
+    ["plain", "plain"],
+    ["", '""'],
+    ["two words", '"two words"'],
+    ["clean C:\\tmp\\", '"clean C:\\tmp\\\\"'],
+    ['say "hi"', '"say \\"hi\\""'],
+    ['[{"id":"1","text":"a \\"b\\""}]', '"[{\\"id\\":\\"1\\",\\"text\\":\\"a \\\\\\"b\\\\\\"\\"}]"'],
+    ["C:\\dir\\", "C:\\dir\\"],
+  ];
+  for (const [value, expected] of table) {
+    expect(quoteNativeArg(value)).toBe(expected);
+    expect(parseNativeArg(quoteNativeArg(value))).toBe(value);
+  }
+  for (const value of ['a\\"b', 'x\\\\"', "trailing \\\\", '"', '\\"', " "]) {
+    expect(parseNativeArg(quoteNativeArg(value))).toBe(value);
+  }
+});
