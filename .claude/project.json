@@ -1,0 +1,20 @@
+{
+  "version": 2,
+  "integrationBranch": "master",
+  "productionBranch": "master",
+  "ticketSystem": "none",
+  "install": null,
+  "verify": "just check",
+  "formatter": "cargo fmt",
+  "app": {
+    "kind": "tui",
+    "start": "env -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH cargo run --",
+    "health": null,
+    "notes": "Terminal app, no HTTP health URL. Live checks use the herdr-throwaway-repro skill."
+  },
+  "e2e": null,
+  "coverage": { "command": null, "threshold": 80 },
+  "environments": {},
+  "autonomy": { "allowMerge": false },
+  "requiredChecks": []
+}
