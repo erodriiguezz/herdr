@@ -196,6 +196,7 @@ mod tests {
             "pane.report_agent_session",
             "pane.report_metadata",
             "pane.report_progress",
+            "pane.update_progress",
             "pane.clear_agent_authority",
             "pane.release_agent",
             "pane.close",

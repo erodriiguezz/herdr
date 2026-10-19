@@ -3378,6 +3378,56 @@
           ],
           "type": "object"
         },
+        "PaneUpdateProgressParams": {
+          "description": "Upserts one checklist item by id. `deleted` removes it; an unknown id\nwithout a `subject` is ignored.",
+          "properties": {
+            "agent": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "source": {
+              "type": "string"
+            },
+            "status": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/ProgressUpdateStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "subject": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "pane_id",
+            "source",
+            "id"
+          ],
+          "type": "object"
+        },
         "PaneWaitForOutputParams": {
           "properties": {
             "lines": {
@@ -3868,6 +3918,13 @@
         },
         "ProgressItem": {
           "properties": {
+            "id": {
+              "description": "Stable identifier used by `pane.update_progress`; optional for full reports.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "status": {
               "$ref": "#/schemas/request/$defs/ProgressStatus",
               "default": "pending"
@@ -3894,6 +3951,28 @@
             {
               "const": "unknown",
               "description": "Any status this server does not recognise; treated as pending.",
+              "type": "string"
+            }
+          ]
+        },
+        "ProgressUpdateStatus": {
+          "oneOf": [
+            {
+              "enum": [
+                "pending",
+                "in_progress",
+                "completed"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "deleted",
+              "description": "Removes the item.",
+              "type": "string"
+            },
+            {
+              "const": "unknown",
+              "description": "Any status this server does not recognise; treated as no status change.",
               "type": "string"
             }
           ]
@@ -6054,6 +6133,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/PaneReportProgressParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.update_progress",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneUpdateProgressParams"
             }
           },
           "required": [
@@ -9282,6 +9377,13 @@
         },
         "ProgressItem": {
           "properties": {
+            "id": {
+              "description": "Stable identifier used by `pane.update_progress`; optional for full reports.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "status": {
               "$ref": "#/schemas/success_response/$defs/ProgressStatus",
               "default": "pending"

@@ -15,7 +15,9 @@ mod metadata;
 pub use metadata::{AgentMetadata, AgentMetadataReport, EffectivePresentation};
 #[path = "progress.rs"]
 mod progress;
-pub use progress::{build_progress, ProgressError, ProgressSlot};
+pub use progress::{
+    apply_update, build_progress, ProgressError, ProgressSlot, ProgressUpdateOutcome,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HookAuthority {
@@ -1501,6 +1503,47 @@ impl TerminalState {
             self.revision = self.revision.saturating_add(1);
         }
         Ok(!unchanged)
+    }
+
+    /// Upserts one checklist item by id (see `progress::apply_update`).
+    /// Shares the sequence guard with `report_progress`; invalid updates are
+    /// rejected before the sequence is accepted.
+    pub fn update_progress(
+        &mut self,
+        source: &str,
+        seq: Option<u64>,
+        id: String,
+        subject: Option<String>,
+        status: Option<crate::api::schema::ProgressUpdateStatus>,
+    ) -> Result<bool, ProgressReportError> {
+        let outcome = apply_update(
+            self.progress.current.as_ref(),
+            source,
+            seq,
+            id,
+            subject,
+            status,
+        )
+        .map_err(ProgressReportError::Invalid)?;
+        match crate::metadata_tokens::accept_sequence(&mut self.progress.sequences, source, seq) {
+            Ok(true) => {}
+            Ok(false) => return Ok(false),
+            Err(()) => return Err(ProgressReportError::SourceLimit),
+        }
+        let ProgressUpdateOutcome::Next(next) = outcome else {
+            return Ok(false);
+        };
+        let unchanged = match (&self.progress.current, &next) {
+            (Some(current), Some(next)) => current.items == next.items,
+            (None, None) => true,
+            _ => false,
+        };
+        if unchanged {
+            return Ok(false);
+        }
+        self.progress.current = next;
+        self.revision = self.revision.saturating_add(1);
+        Ok(true)
     }
 
     /// Metadata tokens as shown to clients: the user-reported tokens plus the

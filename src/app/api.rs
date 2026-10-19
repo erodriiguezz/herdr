@@ -1198,6 +1198,9 @@ impl App {
             Method::PaneReportProgress(params) => {
                 return self.handle_pane_report_progress(request.id, params);
             }
+            Method::PaneUpdateProgress(params) => {
+                return self.handle_pane_update_progress(request.id, params);
+            }
             Method::PaneProgress(target) => {
                 return self.handle_pane_progress(request.id, target);
             }

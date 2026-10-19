@@ -491,6 +491,9 @@ pub enum ProgressStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProgressItem {
+    /// Stable identifier used by `pane.update_progress`; optional for full reports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub text: String,
     #[serde(default)]
     pub status: ProgressStatus,
@@ -506,6 +509,36 @@ pub struct PaneReportProgressParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seq: Option<u64>,
     pub items: Vec<ProgressItem>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgressUpdateStatus {
+    Pending,
+    InProgress,
+    Completed,
+    /// Removes the item.
+    Deleted,
+    /// Any status this server does not recognise; treated as no status change.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Upserts one checklist item by id. `deleted` removes it; an unknown id
+/// without a `subject` is ignored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneUpdateProgressParams {
+    pub pane_id: String,
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<ProgressUpdateStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

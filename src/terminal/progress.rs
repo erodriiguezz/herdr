@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use crate::api::schema::{ProgressItem, ProgressStatus};
+use crate::api::schema::{ProgressItem, ProgressStatus, ProgressUpdateStatus};
 
 pub const MAX_PROGRESS_ITEMS: usize = 100;
 pub const MAX_PROGRESS_ITEM_CHARS: usize = 500;
@@ -80,24 +80,116 @@ pub fn build_progress(
             continue;
         }
         clean.push(ProgressItem {
+            id: clean_id(item.id)?,
             text,
             status: item.status,
         });
     }
-    if clean.is_empty() {
-        return Ok(None);
+    Ok(assemble(source, seq, clean))
+}
+
+fn assemble(source: &str, seq: Option<u64>, items: Vec<ProgressItem>) -> Option<AgentProgress> {
+    if items.is_empty() {
+        return None;
     }
-    let done = clean
+    let done = items
         .iter()
         .filter(|item| item.status == ProgressStatus::Completed)
         .count();
-    Ok(Some(AgentProgress {
-        total: clean.len(),
+    Some(AgentProgress {
+        total: items.len(),
         done,
-        items: clean,
+        items,
         source: source.to_string(),
         last_seq: seq,
-    }))
+    })
+}
+
+fn clean_id(id: Option<String>) -> Result<Option<String>, ProgressError> {
+    let Some(id) = id else {
+        return Ok(None);
+    };
+    if id.chars().count() > MAX_PROGRESS_ITEM_CHARS {
+        return Err(ProgressError::ItemTooLong);
+    }
+    let id = sanitize_text(&id);
+    Ok((!id.is_empty()).then_some(id))
+}
+
+/// Result of applying one `pane.update_progress` to the current checklist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProgressUpdateOutcome {
+    /// Nothing to change (unknown id without subject, empty id, no-op).
+    Unchanged,
+    /// The new checklist; `None` means the last item was removed.
+    Next(Option<AgentProgress>),
+}
+
+/// Pure upsert of one item by id. Validates before returning so a rejected
+/// update never touches the sequence guard or the stored list.
+pub fn apply_update(
+    current: Option<&AgentProgress>,
+    source: &str,
+    seq: Option<u64>,
+    id: String,
+    subject: Option<String>,
+    status: Option<ProgressUpdateStatus>,
+) -> Result<ProgressUpdateOutcome, ProgressError> {
+    let Some(id) = clean_id(Some(id))? else {
+        return Ok(ProgressUpdateOutcome::Unchanged);
+    };
+    let subject = match subject {
+        Some(subject) => {
+            if subject.chars().count() > MAX_PROGRESS_ITEM_CHARS {
+                return Err(ProgressError::ItemTooLong);
+            }
+            Some(sanitize_text(&subject)).filter(|subject| !subject.is_empty())
+        }
+        None => None,
+    };
+    let mut items = current.map(|c| c.items.clone()).unwrap_or_default();
+    let position = items
+        .iter()
+        .position(|item| item.id.as_deref() == Some(id.as_str()));
+
+    if status == Some(ProgressUpdateStatus::Deleted) {
+        let Some(position) = position else {
+            return Ok(ProgressUpdateOutcome::Unchanged);
+        };
+        items.remove(position);
+    } else {
+        let status = match status {
+            Some(ProgressUpdateStatus::Pending) => Some(ProgressStatus::Pending),
+            Some(ProgressUpdateStatus::InProgress) => Some(ProgressStatus::InProgress),
+            Some(ProgressUpdateStatus::Completed) => Some(ProgressStatus::Completed),
+            Some(ProgressUpdateStatus::Deleted | ProgressUpdateStatus::Unknown) | None => None,
+        };
+        match position {
+            Some(position) => {
+                let item = &mut items[position];
+                if let Some(status) = status {
+                    item.status = status;
+                }
+                if let Some(subject) = subject {
+                    item.text = subject;
+                }
+            }
+            None => {
+                let Some(subject) = subject else {
+                    return Ok(ProgressUpdateOutcome::Unchanged);
+                };
+                if items.len() >= MAX_PROGRESS_ITEMS {
+                    return Err(ProgressError::TooManyItems);
+                }
+                items.push(ProgressItem {
+                    id: Some(id),
+                    text: subject,
+                    status: status.unwrap_or(ProgressStatus::Pending),
+                });
+            }
+        }
+    }
+    Ok(ProgressUpdateOutcome::Next(assemble(source, seq, items)))
 }
 
 /// Control characters (ESC, C0, DEL, C1) are removed; line breaks and tabs
@@ -120,6 +212,7 @@ mod tests {
 
     fn item(text: &str, status: ProgressStatus) -> ProgressItem {
         ProgressItem {
+            id: None,
             text: text.into(),
             status,
         }
@@ -390,6 +483,159 @@ mod tests {
             );
             assert!(terminal.progress.current.is_none());
             assert!(terminal.progress.sequences.is_empty());
+        }
+
+        use crate::api::schema::ProgressUpdateStatus as Up;
+
+        fn upd(
+            terminal: &mut TerminalState,
+            seq: Option<u64>,
+            id: &str,
+            subject: Option<&str>,
+            status: Option<Up>,
+        ) -> Result<bool, ProgressReportError> {
+            terminal.update_progress("s", seq, id.into(), subject.map(String::from), status)
+        }
+
+        fn texts(terminal: &TerminalState) -> Vec<(String, ProgressStatus)> {
+            terminal
+                .progress
+                .current
+                .as_ref()
+                .map(|p| p.items.iter().map(|i| (i.text.clone(), i.status)).collect())
+                .unwrap_or_default()
+        }
+
+        // AC-1.9
+        #[test]
+        fn update_appends_new_id_and_changes_known_id() {
+            let mut terminal = terminal();
+            assert_eq!(upd(&mut terminal, Some(1), "1", Some("A"), None), Ok(true));
+            assert_eq!(
+                upd(&mut terminal, Some(2), "2", Some("B"), Some(Up::InProgress)),
+                Ok(true)
+            );
+            assert_eq!(tokens_progress(&terminal).as_deref(), Some("0/2"));
+            assert_eq!(
+                upd(&mut terminal, Some(3), "1", None, Some(Up::Completed)),
+                Ok(true)
+            );
+            assert_eq!(tokens_progress(&terminal).as_deref(), Some("1/2"));
+            assert_eq!(upd(&mut terminal, Some(4), "2", Some("B2"), None), Ok(true));
+            assert_eq!(
+                texts(&terminal),
+                vec![
+                    ("A".to_string(), ProgressStatus::Completed),
+                    ("B2".to_string(), ProgressStatus::InProgress)
+                ]
+            );
+            let revision = terminal.revision;
+            assert_eq!(
+                upd(
+                    &mut terminal,
+                    Some(5),
+                    "2",
+                    Some("B2"),
+                    Some(Up::InProgress)
+                ),
+                Ok(false)
+            );
+            assert_eq!(terminal.revision, revision);
+        }
+
+        // AC-1.9
+        #[test]
+        fn update_unknown_id_without_subject_is_ignored() {
+            let mut terminal = terminal();
+            assert_eq!(
+                upd(&mut terminal, None, "9", None, Some(Up::Completed)),
+                Ok(false)
+            );
+            assert!(terminal.progress.current.is_none());
+            assert_eq!(
+                upd(&mut terminal, None, "9", None, Some(Up::Deleted)),
+                Ok(false)
+            );
+        }
+
+        // AC-1.9
+        #[test]
+        fn update_deleted_removes_and_last_removal_clears() {
+            let mut terminal = terminal();
+            upd(&mut terminal, None, "1", Some("A"), None).unwrap();
+            upd(&mut terminal, None, "2", Some("B"), None).unwrap();
+            assert_eq!(
+                upd(&mut terminal, None, "1", None, Some(Up::Deleted)),
+                Ok(true)
+            );
+            assert_eq!(tokens_progress(&terminal).as_deref(), Some("0/1"));
+            assert_eq!(
+                upd(&mut terminal, None, "2", None, Some(Up::Deleted)),
+                Ok(true)
+            );
+            assert!(terminal.progress.current.is_none());
+            assert_eq!(tokens_progress(&terminal), None);
+        }
+
+        // AC-1.9
+        #[test]
+        fn update_enforces_limits_and_keeps_list() {
+            let mut terminal = terminal();
+            for i in 0..MAX_PROGRESS_ITEMS {
+                upd(&mut terminal, None, &i.to_string(), Some("x"), None).unwrap();
+            }
+            assert_eq!(
+                upd(&mut terminal, None, "new", Some("y"), None),
+                Err(ProgressReportError::Invalid(ProgressError::TooManyItems))
+            );
+            assert_eq!(terminal.progress.current.as_ref().unwrap().total, 100);
+            assert_eq!(
+                upd(&mut terminal, None, "0", Some(&"x".repeat(501)), None),
+                Err(ProgressReportError::Invalid(ProgressError::ItemTooLong))
+            );
+            assert_eq!(
+                upd(&mut terminal, None, &"i".repeat(501), Some("y"), None),
+                Err(ProgressReportError::Invalid(ProgressError::ItemTooLong))
+            );
+            assert_eq!(texts(&terminal)[0].0, "x");
+            assert_eq!(
+                upd(&mut terminal, None, "0", Some("\x1b[31mred\x07"), None),
+                Ok(true)
+            );
+            assert_eq!(texts(&terminal)[0].0, "[31mred");
+        }
+
+        // AC-1.9
+        #[test]
+        fn update_shares_sequence_guard_with_report() {
+            let mut terminal = terminal();
+            terminal.report_progress("s", Some(5), items(0, 1)).unwrap();
+            assert_eq!(
+                upd(&mut terminal, Some(4), "x", Some("late"), None),
+                Ok(false)
+            );
+            assert_eq!(texts(&terminal).len(), 1);
+            assert_eq!(upd(&mut terminal, Some(6), "x", Some("ok"), None), Ok(true));
+            assert_eq!(
+                terminal.report_progress("s", Some(6), items(0, 3)),
+                Ok(false)
+            );
+            assert_eq!(texts(&terminal).len(), 2);
+            // Rejected updates do not consume the sequence.
+            assert!(upd(&mut terminal, Some(9), "z", Some(&"x".repeat(501)), None).is_err());
+            assert_eq!(upd(&mut terminal, Some(7), "z", Some("z"), None), Ok(true));
+        }
+
+        // AC-1.9
+        #[test]
+        fn update_unknown_status_changes_nothing_but_subject() {
+            let mut terminal = terminal();
+            upd(&mut terminal, None, "1", Some("A"), Some(Up::Completed)).unwrap();
+            assert_eq!(
+                upd(&mut terminal, None, "1", None, Some(Up::Unknown)),
+                Ok(false)
+            );
+            assert_eq!(texts(&terminal)[0].1, ProgressStatus::Completed);
         }
     }
 }

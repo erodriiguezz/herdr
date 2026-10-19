@@ -13,8 +13,8 @@ use crate::api::schema::{
     PaneReportMetadataParams, PaneReportProgressParams, PaneResizeParams, PaneResizeReason,
     PaneResizeResult, PaneScrollParams, PaneSelectionReadParams, PaneSendInputParams,
     PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneSwapReason,
-    PaneSwapResult, PaneTarget, PaneTextPoint, PaneTextRange, PaneZoomMode, PaneZoomParams,
-    PaneZoomReason, PaneZoomResult, ResponseResult,
+    PaneSwapResult, PaneTarget, PaneTextPoint, PaneTextRange, PaneUpdateProgressParams,
+    PaneZoomMode, PaneZoomParams, PaneZoomReason, PaneZoomResult, ResponseResult,
 };
 use crate::app::actions::{PaneZoomCommand, PaneZoomNoopReason};
 use crate::app::App;
@@ -1892,6 +1892,54 @@ impl App {
             return pane_not_found(id, &params.pane_id);
         };
         match terminal.report_progress(&source, params.seq, params.items) {
+            Ok(true) => {
+                self.emit_pane_updated(ws_idx, pane_id);
+            }
+            Ok(false) => {}
+            Err(ProgressReportError::Invalid(error)) => {
+                return encode_error(id, "invalid_progress", error.message());
+            }
+            Err(ProgressReportError::SourceLimit) => {
+                return encode_error(
+                    id,
+                    "metadata_sequence_source_limit",
+                    format!(
+                        "pane progress may track at most {} sequenced sources",
+                        crate::metadata_tokens::MAX_SEQUENCE_SOURCES
+                    ),
+                );
+            }
+        }
+        encode_success(id, ResponseResult::Ok {})
+    }
+
+    pub(super) fn handle_pane_update_progress(
+        &mut self,
+        id: String,
+        params: PaneUpdateProgressParams,
+    ) -> String {
+        let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        if let Some(agent) = params.agent.as_deref() {
+            if normalize_reported_agent_label(agent).is_none() {
+                return invalid_agent(id);
+            }
+        }
+        let source = match normalize_metadata_source(params.source) {
+            Ok(source) => source,
+            Err(message) => return encode_error(id, "invalid_metadata_source", message),
+        };
+        let Some(terminal) = self.terminal_for_pane_mut(ws_idx, pane_id) else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        match terminal.update_progress(
+            &source,
+            params.seq,
+            params.id,
+            params.subject,
+            params.status,
+        ) {
             Ok(true) => {
                 self.emit_pane_updated(ws_idx, pane_id);
             }
@@ -4784,6 +4832,7 @@ mod tests {
             seq,
             items: (0..total)
                 .map(|i| ProgressItem {
+                    id: None,
                     text: format!("step {i}"),
                     status: if i < done {
                         ProgressStatus::Completed
@@ -4901,6 +4950,49 @@ mod tests {
                 pane_id: "p_nope".into(),
             },
         );
+        assert_eq!(metadata_error_code(&response), "pane_not_found");
+    }
+
+    // AC-1.9
+    #[test]
+    fn pane_update_progress_upserts_and_reports_errors() {
+        use crate::api::schema::{PaneUpdateProgressParams, ProgressUpdateStatus};
+        let (mut app, pane_id) = app_with_test_workspace();
+        let update = |id: &str, subject: Option<&str>, status| PaneUpdateProgressParams {
+            pane_id: pane_id.clone(),
+            source: "herdr:claude".into(),
+            agent: Some("claude".into()),
+            seq: None,
+            id: id.into(),
+            subject: subject.map(String::from),
+            status,
+        };
+        app.handle_pane_update_progress("u1".into(), update("1", Some("A"), None));
+        app.handle_pane_update_progress("u2".into(), update("2", Some("B"), None));
+        app.handle_pane_update_progress(
+            "u3".into(),
+            update("1", None, Some(ProgressUpdateStatus::Completed)),
+        );
+        let progress = read_progress(&mut app, &pane_id);
+        assert_eq!((progress.done, progress.total), (1, 2));
+        assert_eq!(progress.items[0].id.as_deref(), Some("1"));
+        assert_eq!(
+            pane_tokens(&mut app, &pane_id)
+                .get("progress")
+                .map(String::as_str),
+            Some("1/2")
+        );
+        let response =
+            app.handle_pane_update_progress("u4".into(), update("1", Some(&"x".repeat(501)), None));
+        assert_eq!(metadata_error_code(&response), "invalid_progress");
+        app.handle_pane_update_progress(
+            "u5".into(),
+            update("2", None, Some(ProgressUpdateStatus::Deleted)),
+        );
+        assert_eq!(read_progress(&mut app, &pane_id).total, 1);
+        let mut missing = update("1", Some("A"), None);
+        missing.pane_id = "p_nope".into();
+        let response = app.handle_pane_update_progress("u6".into(), missing);
         assert_eq!(metadata_error_code(&response), "pane_not_found");
     }
 }

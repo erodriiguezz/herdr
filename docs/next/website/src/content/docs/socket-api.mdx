@@ -103,7 +103,7 @@ Raw socket method names use dot notation:
 | Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.rename`, `workspace.move`, `workspace.move_block`, `workspace.report_metadata`, `workspace.close` |
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.move`, `tab.close` |
-| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.report_progress`, `pane.progress`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
+| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.report_progress`, `pane.update_progress`, `pane.progress`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
 | Popup | `popup.close` |
 | Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio` |
 | Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.start`, `agent.view.set`, `agent.view.clear` |
@@ -774,6 +774,12 @@ Use `pane.report_progress` to attach a step checklist to a pane, for example the
 ```
 
 `status` is `pending`, `in_progress`, or `completed`; unrecognised values are treated as pending. A report may contain at most 100 items of at most 500 characters each. Larger reports are rejected with `invalid_progress` and leave the previous list unchanged. Control and escape characters are stripped from item text. `seq` works as it does for the other report methods: a report older than the latest accepted one from the same `source` is ignored. `pane.progress` with `{"pane_id": "w1:p1"}` returns `{"items": [...], "done": 1, "total": 3}`, with an empty list when nothing is set.
+
+Agents that report one change at a time can use `pane.update_progress` instead. It upserts a single item by `id`: a new `id` with a `subject` is appended (status defaults to `pending`), a known `id` changes its `status` and/or `subject`, and `status: "deleted"` removes the item (removing the last one clears the checklist). A new `id` without a `subject` is ignored. Items from `pane.report_progress` may carry an optional `id` so later updates can address them. The same limits, sanitising, `seq` rules, and `invalid_progress` errors apply.
+
+```json
+{"id":"req_5","method":"pane.update_progress","params":{"pane_id":"w1:p1","source":"user:todo","id":"2","status":"completed"}}
+```
 
 Herdr also exposes `done/total` as the derived `progress` pane token (for example `1/3`), shown by the default Agent sidebar row. While a checklist exists it takes precedence over a `progress` token set through `pane.report_metadata`. The checklist is kept in memory only and clears when the agent session changes, the agent exits or is released, or Herdr restarts.
 
