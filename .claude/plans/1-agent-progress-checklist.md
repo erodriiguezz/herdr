@@ -218,3 +218,24 @@ Common payload keys: `session_id, transcript_path, cwd, prompt_id, permission_mo
 | TaskList | `{}` | `{"tasks":[{"id":"1","subject":"A","status":"completed","blockedBy":[]}, ...]}` (full list) |
 
 Create and update arrive one change at a time. Only `TaskList` carries the whole list, and Claude calls it at its own discretion. Per the plan, the integration (hook script `.sh`/`.ps1`, `claude_settings.rs`, integration version bumps, installer tests, `herdr-agent-state.test.ts`) was NOT built. Options for the lead: (a) hook only `TaskList` (full list, but updates only when Claude lists), (b) the hook script keeps a per-session task map merged from TaskCreate/TaskUpdate (needs state file or server-side merge API), (c) a server-side delta API. Server, API, CLI, sidebar and docs parts are built.
+
+## Hand-off (run 1 resume, 2026-10-19)
+
+**Built and reviewed:** AC-1.9 `pane.update_progress` (85bc43ec), the Claude PostToolUse hook in `.sh` (286ea100), CLI leaves `pane report-progress`/`update-progress` (6c0ae6e6), the PowerShell hook (345736fc), and the reviewer fixes (d02431c8: PowerShell 5.1 argument quoting, agent-view tokens, cached summary, `--json` flag, docs). Reviewer: request changes → all Medium findings fixed except size.
+
+**Why this stops at agent-blocked, not ready-for-review:** local QA can't go green without weakening a gate, which is out of bounds:
+1. **verify:** 2 nextest failures, `platform::macos::launchd_spawn::tests::detached_server_outlives_its_launcher_job` and `client_mode::federated_launch_opens_local_directly_while_saved_ssh_is_unavailable`. Both time out after 10s. They fail the same way on master `143bf5fd`, unsandboxed and with herdr env vars unset, so this branch did not cause them. Everything else passes: 3,938 of 3,940 tests, fmt, clippy `-D warnings`, 33 bun tests, maintenance, docs-contract and ui-hot-path tests.
+2. **ac:** `ac-coverage.mjs` only reads `*.test|spec.(ts|js)` files. The inline Rust `// AC-1.x` tags (AC-1.1–1.6, 1.8 and 1.9 are all tagged) are invisible to it. Tooling gap.
+3. **ui:** the UI audit needs HTTP routes; herdr is a TUI.
+4. **size:** 2,600 counted lines (pr-size), against the 400 limit and the plan's ~430 estimate.
+
+**AC-1.7 is partial:** the live smoke passed (3/3, cleared on `/exit`) only when Claude Code 2.1.303 was started with `--tools TaskCreate,TaskGet,TaskUpdate,TaskList`. Default interactive Claude offered no task tools. This is now documented in `integrations.mdx`.
+
+**Not executed:** the `.ps1` hook (no `pwsh` here). Its quoting algorithm is checked only by a TypeScript reference port.
+
+**Suggested next step:** decide (a) whether to accept the 2 pre-existing master failures for this PR or fix them first, (b) whether to accept the size or split into server+API / CLI / integration PRs, and (c) whether AC-1.7 with `--tools` counts. Then run the `.ps1` on Windows PowerShell 5.1 and 7 with a stub `HERDR_BIN_PATH`.
+
+## 6. Retro (run 1)
+- The plan sized this at ~430 lines; the change came in at 2,600 counted lines. The update-by-id redesign plus PowerShell parity roughly doubled the integration work. A per-transport (sh vs ps1) line estimate would have caught it.
+- The qa AC scanner can't see Rust inline tests. A `.rs` pattern in `ac-coverage.mjs` would have avoided a false red (proposal, not applied).
+- 2 macOS server-spawn tests already fail on master. A known-failures baseline in `project.json` would separate them from regressions (proposal, not applied).
