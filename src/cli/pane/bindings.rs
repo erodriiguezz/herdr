@@ -387,6 +387,8 @@ pub(super) enum Output {
     Json,
     Quiet,
     Read,
+    /// Checklist text by default; the raw JSON response with `--json`.
+    Progress,
 }
 
 pub(super) struct Leaf {
@@ -404,6 +406,12 @@ impl Leaf {
         match self.name {
             "input" => command.group(clap::ArgGroup::new("selector").args(["pane_id", "pane", "current"]).required(true)),
             "move" => command.group(clap::ArgGroup::new("destination").args(["tab", "new-tab", "new-workspace"]).required(true)),
+            "progress" => command.arg(
+                clap::Arg::new("json")
+                    .long("json")
+                    .action(clap::ArgAction::SetTrue)
+                    .help("Print the JSON response instead of the checklist"),
+            ),
             "send-text" => command.after_help("next: herdr pane run <PANE_ID> <COMMAND> sends text and Enter in one call"),
             "send-keys" => command.after_help("Use esc as the canonical Escape key name; escape is also accepted."),
             "wait-output" => command.after_help("The selected snapshot is searched immediately, including existing output, then polled. Without --timeout, this waits indefinitely."),
@@ -644,6 +652,14 @@ pub(super) const LEAVES: &[Leaf] = &[
         output: Output::Json,
         arguments: PaneMoveProjection::arguments,
         method: super::move_pane,
+    },
+    Leaf {
+        name: "progress",
+        about: "Show the agent progress checklist of a pane",
+        id: "cli:pane:progress",
+        output: Output::Progress,
+        arguments: PaneTargetProjection::arguments,
+        method: |matches| PaneTargetProjection::from_matches(matches).map(Method::PaneProgress),
     },
     leaf!(
         "close",

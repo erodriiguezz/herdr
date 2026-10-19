@@ -300,6 +300,14 @@ herdr pane release-agent <pane_id> \
 
 `report-agent-session` updates native session identity without reporting lifecycle state. `release-agent` ends that source's lifecycle authority when its agent process exits.
 
+Show the agent progress checklist stored for a pane:
+
+```bash
+herdr pane progress <pane_id> [--json]
+```
+
+Each line is `✓` (completed), `▸` (in progress) or `☐` (pending) followed by the step text. `--json` prints the full API response, including `done` and `total`. An empty result means the pane has no checklist. Reporters set it through `pane.report_progress` in the [socket API](/docs/socket-api/).
+
 Arguments after `--` are the command Herdr runs to resume this session after a server restart. The first argument must be a plain command name on `PATH`, and no argument may contain an apostrophe.
 
 `pane get`, `pane list`, `agent get`, and `agent list` include a read-only `agent_session` object when an official integration has reported a native session reference. If no native session reference is stored, the field is omitted.

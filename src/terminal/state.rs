@@ -13,6 +13,9 @@ use crate::terminal::TerminalId;
 #[path = "metadata.rs"]
 mod metadata;
 pub use metadata::{AgentMetadata, AgentMetadataReport, EffectivePresentation};
+#[path = "progress.rs"]
+mod progress;
+pub use progress::{build_progress, ProgressError, ProgressSlot};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HookAuthority {
@@ -109,6 +112,25 @@ pub struct TerminalStateMutation {
     pub agent_released: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgressReportError {
+    Invalid(ProgressError),
+    SourceLimit,
+}
+
+/// The agent checklist belongs to one agent session: drop it when the session
+/// identity changes or the agent leaves the pane.
+fn finish_progress_lifecycle(
+    mutation: TerminalStateMutation,
+    progress: &mut ProgressSlot,
+    revision: &mut u64,
+) -> TerminalStateMutation {
+    if (mutation.session_ref_changed || mutation.agent_released) && progress.clear() {
+        *revision = revision.saturating_add(1);
+    }
+    mutation
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AgentNameOwner {
     agent_label: String,
@@ -136,6 +158,8 @@ pub struct TerminalState {
     pub hook_authority: Option<HookAuthority>,
     pub agent_metadata: HashMap<String, AgentMetadata>,
     pub metadata_tokens: crate::metadata_tokens::MetadataTokens,
+    /// In-memory agent checklist; never persisted.
+    pub progress: ProgressSlot,
     pub persisted_agent_session: Option<crate::agent_resume::PersistedAgentSession>,
     reported_resume: Option<crate::agent_resume::ReportedAgentResume>,
     reported_resume_revision: u64,
@@ -176,6 +200,7 @@ impl TerminalState {
             hook_authority: None,
             agent_metadata: HashMap::new(),
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
+            progress: ProgressSlot::default(),
             persisted_agent_session: None,
             reported_resume: None,
             reported_resume_revision: 0,
@@ -393,18 +418,22 @@ impl TerminalState {
             {
                 self.detected_agent = agent;
             }
-            return TerminalStateMutation {
-                effective_state_change: self.recompute_effective_state(
-                    previous_agent_label,
-                    previous_known_agent,
-                    previous_state,
-                    previous_presentation,
-                    now,
-                ),
-                session_ref_changed: previous_session
-                    != self.current_session_identity_for_persistence(),
-                agent_released: false,
-            };
+            return finish_progress_lifecycle(
+                TerminalStateMutation {
+                    effective_state_change: self.recompute_effective_state(
+                        previous_agent_label,
+                        previous_known_agent,
+                        previous_state,
+                        previous_presentation,
+                        now,
+                    ),
+                    session_ref_changed: previous_session
+                        != self.current_session_identity_for_persistence(),
+                    agent_released: false,
+                },
+                &mut self.progress,
+                &mut self.revision,
+            );
         }
         let replacement_process_detected = !process_exited
             && agent.is_some()
@@ -412,18 +441,22 @@ impl TerminalState {
                 .recent_agent_process_exit
                 .is_some_and(|exit| Some(exit.agent) == agent && exit.observed_at < now);
         if !process_exited && self.detected_state_observed_before_release_suppression(agent, now) {
-            return TerminalStateMutation {
-                effective_state_change: self.recompute_effective_state(
-                    previous_agent_label,
-                    previous_known_agent,
-                    previous_state,
-                    previous_presentation,
-                    now,
-                ),
-                session_ref_changed: previous_session
-                    != self.current_session_identity_for_persistence(),
-                agent_released: false,
-            };
+            return finish_progress_lifecycle(
+                TerminalStateMutation {
+                    effective_state_change: self.recompute_effective_state(
+                        previous_agent_label,
+                        previous_known_agent,
+                        previous_state,
+                        previous_presentation,
+                        now,
+                    ),
+                    session_ref_changed: previous_session
+                        != self.current_session_identity_for_persistence(),
+                    agent_released: false,
+                },
+                &mut self.progress,
+                &mut self.revision,
+            );
         }
         self.detected_agent = agent;
         if process_exited || agent != Some(Agent::Codex) || fallback_state == AgentState::Blocked {
@@ -649,12 +682,16 @@ impl TerminalState {
         if fallback_state == AgentState::Working && self.state == AgentState::Working {
             self.agent_process_acquisition_pending = false;
         }
-        TerminalStateMutation {
-            effective_state_change,
-            session_ref_changed: previous_session
-                != self.current_session_identity_for_persistence(),
-            agent_released,
-        }
+        finish_progress_lifecycle(
+            TerminalStateMutation {
+                effective_state_change,
+                session_ref_changed: previous_session
+                    != self.current_session_identity_for_persistence(),
+                agent_released,
+            },
+            &mut self.progress,
+            &mut self.revision,
+        )
     }
 
     #[cfg(test)]
@@ -811,11 +848,15 @@ impl TerminalState {
         if state == AgentState::Working && self.state == AgentState::Working {
             self.agent_process_acquisition_pending = false;
         }
-        Some(TerminalStateMutation {
-            effective_state_change,
-            session_ref_changed: previous_session != current_session,
-            agent_released: false,
-        })
+        Some(finish_progress_lifecycle(
+            TerminalStateMutation {
+                effective_state_change,
+                session_ref_changed: previous_session != current_session,
+                agent_released: false,
+            },
+            &mut self.progress,
+            &mut self.revision,
+        ))
     }
 
     fn hook_authority_not_newer_than(&self, observed_at: Instant) -> bool {
@@ -1433,10 +1474,52 @@ impl TerminalState {
             == ("herdr:opencode", "opencode", Some("select"), None)
     }
 
+    /// Replaces (or, for an empty report, clears) the agent checklist.
+    /// Returns `Ok(true)` when the stored checklist changed, `Ok(false)` for a
+    /// stale or no-op report. Invalid reports leave the previous list intact.
+    pub fn report_progress(
+        &mut self,
+        source: &str,
+        seq: Option<u64>,
+        items: Vec<crate::api::schema::ProgressItem>,
+    ) -> Result<bool, ProgressReportError> {
+        let next = build_progress(source, seq, items).map_err(ProgressReportError::Invalid)?;
+        match crate::metadata_tokens::accept_sequence(&mut self.progress.sequences, source, seq) {
+            Ok(true) => {}
+            Ok(false) => return Ok(false),
+            Err(()) => return Err(ProgressReportError::SourceLimit),
+        }
+        let unchanged = match (&self.progress.current, &next) {
+            (Some(current), Some(next)) => {
+                current.items == next.items && current.source == next.source
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        self.progress.current = next;
+        if !unchanged {
+            self.revision = self.revision.saturating_add(1);
+        }
+        Ok(!unchanged)
+    }
+
+    /// Metadata tokens as shown to clients: the user-reported tokens plus the
+    /// derived `progress` value, which wins over a reported `progress` token.
+    pub fn display_tokens(&self) -> HashMap<String, String> {
+        let mut tokens = self.metadata_tokens.values();
+        if let Some(summary) = self.progress.summary() {
+            tokens.insert("progress".into(), summary);
+        }
+        tokens
+    }
+
     pub fn set_persisted_agent_session(
         &mut self,
         session: crate::agent_resume::PersistedAgentSession,
     ) {
+        if self.persisted_agent_session.as_ref() != Some(&session) && self.progress.clear() {
+            self.revision = self.revision.saturating_add(1);
+        }
         self.persisted_agent_session = Some(session);
     }
 
@@ -1574,17 +1657,21 @@ impl TerminalState {
             if process_present {
                 self.clear_full_lifecycle_hook_suppression_for_detected_agent(None, known_agent);
                 let current_session = self.current_session_identity_for_persistence();
-                return Some(TerminalStateMutation {
-                    effective_state_change: self.recompute_effective_state(
-                        previous_agent_label,
-                        previous_known_agent,
-                        previous_state,
-                        previous_presentation,
-                        now,
-                    ),
-                    session_ref_changed: previous_session != current_session,
-                    agent_released: false,
-                });
+                return Some(finish_progress_lifecycle(
+                    TerminalStateMutation {
+                        effective_state_change: self.recompute_effective_state(
+                            previous_agent_label,
+                            previous_known_agent,
+                            previous_state,
+                            previous_presentation,
+                            now,
+                        ),
+                        session_ref_changed: previous_session != current_session,
+                        agent_released: false,
+                    },
+                    &mut self.progress,
+                    &mut self.revision,
+                ));
             }
             return None;
         }
@@ -1682,17 +1769,21 @@ impl TerminalState {
             // Rebinding can expose a cached Working screen; only a fresh report ends acquisition.
             self.agent_process_acquisition_pending = true;
         }
-        Some(TerminalStateMutation {
-            effective_state_change: self.recompute_effective_state(
-                previous_agent_label,
-                previous_known_agent,
-                previous_state,
-                previous_presentation,
-                now,
-            ),
-            session_ref_changed: previous_session != current_session,
-            agent_released: false,
-        })
+        Some(finish_progress_lifecycle(
+            TerminalStateMutation {
+                effective_state_change: self.recompute_effective_state(
+                    previous_agent_label,
+                    previous_known_agent,
+                    previous_state,
+                    previous_presentation,
+                    now,
+                ),
+                session_ref_changed: previous_session != current_session,
+                agent_released: false,
+            },
+            &mut self.progress,
+            &mut self.revision,
+        ))
     }
 
     fn known_agent_label_conflicts_with_detected_agent(&self, agent_label: &str) -> bool {
@@ -1795,17 +1886,21 @@ impl TerminalState {
             self.forget_reported_resume_of(&authority.source, &authority.agent_label);
         }
         self.persisted_agent_session = None;
-        Some(TerminalStateMutation {
-            effective_state_change: self.recompute_effective_state(
-                previous_agent_label,
-                previous_known_agent,
-                previous_state,
-                previous_presentation,
-                now,
-            ),
-            session_ref_changed: previous_session.is_some(),
-            agent_released: false,
-        })
+        Some(finish_progress_lifecycle(
+            TerminalStateMutation {
+                effective_state_change: self.recompute_effective_state(
+                    previous_agent_label,
+                    previous_known_agent,
+                    previous_state,
+                    previous_presentation,
+                    now,
+                ),
+                session_ref_changed: previous_session.is_some(),
+                agent_released: false,
+            },
+            &mut self.progress,
+            &mut self.revision,
+        ))
     }
 
     pub fn release_agent_with_mutation(
@@ -1837,6 +1932,10 @@ impl TerminalState {
                 self.detected_agent == Some(agent) && self.recent_agent_process_exit.is_none()
             });
 
+        if self.progress.clear() {
+            self.revision = self.revision.saturating_add(1);
+        }
+
         let now = Instant::now();
         let previous_agent_label = self.effective_agent_label().map(str::to_string);
         let previous_known_agent = self.effective_known_agent();
@@ -1861,17 +1960,21 @@ impl TerminalState {
             self.persisted_agent_session = None;
         }
         let current_session = self.current_session_identity_for_persistence();
-        Some(TerminalStateMutation {
-            effective_state_change: self.recompute_effective_state(
-                previous_agent_label,
-                previous_known_agent,
-                previous_state,
-                previous_presentation,
-                now,
-            ),
-            session_ref_changed: previous_session != current_session,
-            agent_released: !process_owns_agent,
-        })
+        Some(finish_progress_lifecycle(
+            TerminalStateMutation {
+                effective_state_change: self.recompute_effective_state(
+                    previous_agent_label,
+                    previous_known_agent,
+                    previous_state,
+                    previous_presentation,
+                    now,
+                ),
+                session_ref_changed: previous_session != current_session,
+                agent_released: !process_owns_agent,
+            },
+            &mut self.progress,
+            &mut self.revision,
+        ))
     }
 
     /// A reporter that Herdr cannot also identify by process holds this pane,
@@ -1905,17 +2008,21 @@ impl TerminalState {
         self.fallback_observed_at = None;
         self.clear_agent_name();
         let current_session = self.current_session_identity_for_persistence();
-        Some(TerminalStateMutation {
-            effective_state_change: self.recompute_effective_state(
-                previous_agent_label,
-                previous_known_agent,
-                previous_state,
-                previous_presentation,
-                now,
-            ),
-            session_ref_changed: previous_session != current_session,
-            agent_released: true,
-        })
+        Some(finish_progress_lifecycle(
+            TerminalStateMutation {
+                effective_state_change: self.recompute_effective_state(
+                    previous_agent_label,
+                    previous_known_agent,
+                    previous_state,
+                    previous_presentation,
+                    now,
+                ),
+                session_ref_changed: previous_session != current_session,
+                agent_released: true,
+            },
+            &mut self.progress,
+            &mut self.revision,
+        ))
     }
 
     pub fn session_ref_is_current(
@@ -2331,6 +2438,7 @@ impl TerminalState {
         self.fallback_observed_at = None;
         self.hook_authority = None;
         self.persisted_agent_session = None;
+        self.progress.clear();
         self.agent_metadata.clear();
         self.metadata_report_agents.clear();
         self.suppressed_full_lifecycle_hook_reports.clear();

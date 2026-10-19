@@ -358,7 +358,7 @@ impl App {
             display_agent: presentation.display_agent,
             agent_status: pane_agent_status(terminal.state, pane.seen),
             state_labels: presentation.state_labels,
-            tokens: terminal.metadata_tokens.values(),
+            tokens: terminal.display_tokens(),
             agent_session: terminal_agent_session_info(terminal),
             scroll: None,
             revision: terminal.revision,

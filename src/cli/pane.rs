@@ -43,6 +43,13 @@ pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
     match leaf.output {
         bindings::Output::Json => super::print_response(&response),
         bindings::Output::Read => super::print_read_response(&response),
+        bindings::Output::Progress => {
+            if args.iter().any(|arg| arg == "--json") {
+                super::print_response(&response)
+            } else {
+                print_progress_response(&response)
+            }
+        }
         bindings::Output::Quiet => {
             if response.get("error").is_some() {
                 super::print_response(&response)
@@ -51,6 +58,32 @@ pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
             }
         }
     }
+}
+
+fn progress_mark(status: &str) -> &'static str {
+    match status {
+        "completed" => "\u{2713}",
+        "in_progress" => "\u{25b8}",
+        _ => "\u{2610}",
+    }
+}
+
+fn format_progress(result: &serde_json::Value) -> String {
+    let mut out = String::new();
+    for item in result["items"].as_array().into_iter().flatten() {
+        let status = item["status"].as_str().unwrap_or("pending");
+        let text = item["text"].as_str().unwrap_or_default();
+        out.push_str(&format!("{} {text}\n", progress_mark(status)));
+    }
+    out
+}
+
+fn print_progress_response(response: &serde_json::Value) -> std::io::Result<i32> {
+    if response.get("error").is_some() {
+        return super::print_response(response);
+    }
+    print!("{}", format_progress(&response["result"]["progress"]));
+    Ok(0)
 }
 
 fn last_index(matches: &ArgMatches, names: &[&str]) -> Option<usize> {
@@ -406,6 +439,13 @@ mod tests {
                 json!({"pane_id": "pane", "source": "hook", "agent": "a"}),
             ),
             (
+                "progress",
+                vec!["pane"],
+                "cli:pane:progress",
+                "pane.progress",
+                json!({"pane_id": "pane"}),
+            ),
+            (
                 "report-metadata",
                 vec!["pane", "--source", " hook ", "--clear-title"],
                 "cli:request",
@@ -421,6 +461,36 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    // AC-1.1
+    #[test]
+    fn progress_text_uses_status_marks_in_order() {
+        let result = serde_json::json!({"items": [
+            {"text": "write tests", "status": "completed"},
+            {"text": "write code", "status": "in_progress"},
+            {"text": "ship", "status": "pending"},
+            {"text": "mystery", "status": "unknown"},
+        ], "done": 1, "total": 4});
+        assert_eq!(
+            format_progress(&result),
+            "\u{2713} write tests\n\u{25b8} write code\n\u{2610} ship\n\u{2610} mystery\n"
+        );
+        assert_eq!(
+            format_progress(&serde_json::json!({"items": [], "done": 0, "total": 0})),
+            ""
+        );
+    }
+
+    // AC-1.1
+    #[test]
+    fn progress_command_accepts_json_flag() {
+        let leaf = bindings::LEAVES
+            .iter()
+            .find(|leaf| leaf.name == "progress")
+            .unwrap();
+        let request = leaf.request(&args(&["pane", "--json"])).unwrap();
+        assert!(matches!(request.method, Method::PaneProgress(_)));
     }
 
     #[test]

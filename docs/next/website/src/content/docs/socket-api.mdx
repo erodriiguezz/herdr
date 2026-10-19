@@ -103,7 +103,7 @@ Raw socket method names use dot notation:
 | Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.rename`, `workspace.move`, `workspace.move_block`, `workspace.report_metadata`, `workspace.close` |
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.move`, `tab.close` |
-| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
+| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.report_progress`, `pane.progress`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
 | Popup | `popup.close` |
 | Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio` |
 | Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.start`, `agent.view.set`, `agent.view.clear` |
@@ -753,6 +753,29 @@ Use `pane.report_metadata` when a user hook wants to customize presentation with
 Metadata reports are display-only. Valid metadata can override the pane title, displayed agent name, visible state labels, and arbitrary named tokens. `working`, `blocked`, `idle`, waits, notifications, and rollups still come from semantic state. Native session restore comes from stored official session references. `agent` is an optional guard for presentation fields against the authoritative agent label; `applies_to_source` similarly guards presentation fields against the active lifecycle authority source. These guards do not apply to token patches: token reporters own clearing and TTL refresh. Use `display_agent` to change the visible name. `state_labels` keys must be `idle`, `working`, `blocked`, `done`, or `unknown`.
 
 Token maps are per-resource patches. A string sets a key, JSON `null` clears it, and omitted keys remain unchanged. The latest accepted update wins. Optional TTL applies independently to token keys updated by that report. Pane tokens are exposed by pane and agent get/list responses and can be rendered as `$name` in Agent sidebar rows. A report may mention at most 16 token keys, and a pane or workspace may retain at most 32 keys. Token names are 1–32 ASCII letters, digits, underscores, or hyphens.
+
+Use `pane.report_progress` to attach a step checklist to a pane, for example the task list of a coding agent. Each report replaces the whole list; an empty `items` array clears it.
+
+```json
+{
+  "id": "req_4",
+  "method": "pane.report_progress",
+  "params": {
+    "pane_id": "w1:p1",
+    "source": "user:todo",
+    "seq": 12,
+    "items": [
+      {"text": "Write tests", "status": "completed"},
+      {"text": "Implement handler", "status": "in_progress"},
+      {"text": "Update docs", "status": "pending"}
+    ]
+  }
+}
+```
+
+`status` is `pending`, `in_progress`, or `completed`; unrecognised values are treated as pending. A report may contain at most 100 items of at most 500 characters each. Larger reports are rejected with `invalid_progress` and leave the previous list unchanged. Control and escape characters are stripped from item text. `seq` works as it does for the other report methods: a report older than the latest accepted one from the same `source` is ignored. `pane.progress` with `{"pane_id": "w1:p1"}` returns `{"items": [...], "done": 1, "total": 3}`, with an empty list when nothing is set.
+
+Herdr also exposes `done/total` as the derived `progress` pane token (for example `1/3`), shown by the default Agent sidebar row. While a checklist exists it takes precedence over a `progress` token set through `pane.report_metadata`. The checklist is kept in memory only and clears when the agent session changes, the agent exits or is released, or Herdr restarts.
 
 Workspace tokens use the same contract:
 

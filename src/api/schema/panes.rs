@@ -475,6 +475,47 @@ crate::cli::projection::cli_params! {
     }
 }
 
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgressStatus {
+    #[default]
+    Pending,
+    InProgress,
+    Completed,
+    /// Any status this server does not recognise; treated as pending.
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ProgressItem {
+    pub text: String,
+    #[serde(default)]
+    pub status: ProgressStatus,
+}
+
+/// Replaces the pane's agent progress checklist. An empty `items` list clears it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneReportProgressParams {
+    pub pane_id: String,
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
+    pub items: Vec<ProgressItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneProgressResult {
+    pub pane_id: String,
+    pub items: Vec<ProgressItem>,
+    pub done: usize,
+    pub total: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PaneClearAgentAuthorityParams {
     pub pane_id: String,

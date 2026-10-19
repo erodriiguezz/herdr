@@ -8,8 +8,8 @@ use super::integrations::{
 };
 use super::panes::{
     LayoutDescription, PaneEdgesResult, PaneFocusDirectionResult, PaneInfo, PaneLayoutSnapshot,
-    PaneMoveResult, PaneNeighborResult, PaneProcessInfo, PaneReadResult, PaneResizeResult,
-    PaneSwapResult, PaneTextPoint, PaneTextRange, PaneZoomResult,
+    PaneMoveResult, PaneNeighborResult, PaneProcessInfo, PaneProgressResult, PaneReadResult,
+    PaneResizeResult, PaneSwapResult, PaneTextPoint, PaneTextRange, PaneZoomResult,
 };
 use super::plugins::{
     InstalledPluginInfo, PluginActionInfo, PluginCommandLogInfo, PluginInvocationContext,
@@ -161,6 +161,9 @@ pub enum ResponseResult {
     },
     PaneRead {
         read: PaneReadResult,
+    },
+    PaneProgress {
+        progress: PaneProgressResult,
     },
     PaneSelection {
         pane_id: String,

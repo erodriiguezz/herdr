@@ -447,7 +447,10 @@ impl Default for AgentsSidebarConfig {
                     AgentSidebarToken::Workspace,
                     AgentSidebarToken::Tab,
                 ],
-                vec![AgentSidebarToken::Agent],
+                vec![
+                    AgentSidebarToken::Agent,
+                    AgentSidebarToken::Custom("progress".into()),
+                ],
             ],
             rows_by_agent: BTreeMap::new(),
             row_gap: DEFAULT_SIDEBAR_ROW_GAP,
@@ -498,7 +501,10 @@ mod tests {
                     AgentSidebarToken::Workspace,
                     AgentSidebarToken::Tab,
                 ],
-                vec![AgentSidebarToken::Agent],
+                vec![
+                    AgentSidebarToken::Agent,
+                    AgentSidebarToken::Custom("progress".into()),
+                ],
             ]
         );
         assert!(config.agents.rows_by_agent.is_empty());

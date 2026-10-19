@@ -196,3 +196,18 @@ None (TUI). The live smoke records the sidebar row with `herdr agent read`/pane 
 - Rule, skill or fixture that would have prevented it:
 
 ## 7. Hand-off
+
+### Hand-off: Claude integration blocked (hook payload is deltas, not a full list)
+
+Captured with Claude Code 2.1.303 (`claude -p` with `--tools "TaskCreate,TaskGet,TaskUpdate,TaskList"` and a throwaway `--settings` file whose `PostToolUse` hook appends stdin to a file). `TodoWrite` is not offered by this version (asking for it in `--tools` yields no such tool). Default `-p` mode offers none of the task tools; they only appear when named in `--tools` (interactive sessions not yet captured).
+
+Common payload keys: `session_id, transcript_path, cwd, prompt_id, permission_mode, agent_type, effort, hook_event_name, tool_name, tool_input, tool_response, tool_use_id, duration_ms`.
+
+| tool_name | tool_input | tool_response |
+| --- | --- | --- |
+| TaskCreate | `{"subject":"A","description":"Step A"}` | `{"task":{"id":"1","subject":"A"}}` |
+| TaskUpdate | `{"taskId":"1","status":"completed"}` | `{"success":true,"taskId":"1","updatedFields":["status"],"statusChange":{"from":"pending","to":"completed"}}` |
+| TaskUpdate | `{"taskId":"2","status":"in_progress"}` | same shape, `statusChange.to = in_progress` |
+| TaskList | `{}` | `{"tasks":[{"id":"1","subject":"A","status":"completed","blockedBy":[]}, ...]}` (full list) |
+
+Create and update arrive one change at a time. Only `TaskList` carries the whole list, and Claude calls it at its own discretion. Per the plan, the integration (hook script `.sh`/`.ps1`, `claude_settings.rs`, integration version bumps, installer tests, `herdr-agent-state.test.ts`) was NOT built. Options for the lead: (a) hook only `TaskList` (full list, but updates only when Claude lists), (b) the hook script keeps a per-session task map merged from TaskCreate/TaskUpdate (needs state file or server-side merge API), (c) a server-side delta API. Server, API, CLI, sidebar and docs parts are built.
