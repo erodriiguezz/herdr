@@ -306,7 +306,14 @@ Show the agent progress checklist stored for a pane:
 herdr pane progress <pane_id> [--json]
 ```
 
-Each line is `✓` (completed), `▸` (in progress) or `☐` (pending) followed by the step text. `--json` prints the full API response, including `done` and `total`. An empty result means the pane has no checklist. Reporters set it through `pane.report_progress` in the [socket API](/docs/socket-api/).
+Each line is `✓` (completed), `▸` (in progress) or `☐` (pending) followed by the step text. `--json` prints the full API response, including `done` and `total`. An empty result means the pane has no checklist. Reporters set it through `pane.report_progress` in the [socket API](/docs/socket-api/), or from the CLI:
+
+```bash
+herdr pane report-progress <pane_id> --source <source> --items-json '[{"id":"1","text":"Write tests","status":"completed"}]' [--agent <label>] [--seq <n>]
+herdr pane update-progress <pane_id> --source <source> --id <id> [--subject <text>] [--status pending|in_progress|completed|deleted] [--agent <label>] [--seq <n>]
+```
+
+`report-progress` replaces the whole checklist (`--items-json '[]'` clears it). `update-progress` adds or changes one item by id; `--status deleted` removes it, and an unknown id without `--subject` is ignored.
 
 Arguments after `--` are the command Herdr runs to resume this session after a server restart. The first argument must be a plain command name on `PATH`, and no argument may contain an apostrophe.
 

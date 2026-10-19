@@ -513,6 +513,11 @@ mod tests {
             ),
             (&["pane", "release-agent"][..], &["source", "agent"][..]),
             (&["pane", "report-metadata"][..], &["source"][..]),
+            (
+                &["pane", "report-progress"][..],
+                &["source", "items-json"][..],
+            ),
+            (&["pane", "update-progress"][..], &["source", "id"][..]),
         ] {
             let cmd = command_path(&super::command(), path).clone();
             for option in options {

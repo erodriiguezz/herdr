@@ -452,6 +452,20 @@ mod tests {
                 "pane.report_metadata",
                 json!({"pane_id": "pane", "source": "hook", "clear_title": true, "clear_display_agent": false, "clear_state_labels": false}),
             ),
+            (
+                "report-progress",
+                vec!["pane", "--source", "s", "--items-json", "[]"],
+                "cli:request",
+                "pane.report_progress",
+                json!({"pane_id": "pane", "source": "s", "items": []}),
+            ),
+            (
+                "update-progress",
+                vec!["pane", "--source", "s", "--id", "1"],
+                "cli:request",
+                "pane.update_progress",
+                json!({"pane_id": "pane", "source": "s", "id": "1"}),
+            ),
         ];
         assert_eq!(cases.len(), bindings::LEAVES.len());
         for (name, values, id, method, params) in cases {
@@ -1074,6 +1088,103 @@ mod tests {
         .is_err());
     }
 
+    // AC-1.8
+    #[test]
+    fn progress_report_leaves_build_api_requests() {
+        let json = serde_json::to_value(
+            request(
+                "update-progress",
+                &[
+                    "w1:p1",
+                    "--source",
+                    " herdr:claude ",
+                    "--agent",
+                    "claude",
+                    "--id",
+                    "2",
+                    "--subject",
+                    "B",
+                    "--status",
+                    "in_progress",
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["method"], "pane.update_progress");
+        assert_eq!(
+            json["params"],
+            serde_json::json!({
+                "pane_id": "w1:p1", "source": "herdr:claude", "agent": "claude",
+                "id": "2", "subject": "B", "status": "in_progress"
+            })
+        );
+        let json = serde_json::to_value(
+            request(
+                "update-progress",
+                &[
+                    "w1:p1", "--source", "s", "--id", "3", "--status", "deleted", "--seq", "7",
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["params"]["status"], "deleted");
+        assert_eq!(json["params"]["seq"], 7);
+        assert!(json["params"].get("subject").is_none());
+        assert!(request("update-progress", &["w1:p1", "--source", "s"]).is_err());
+        assert!(request(
+            "update-progress",
+            &["w1:p1", "--source", "s", "--id", "1", "--status", "bogus"]
+        )
+        .is_err());
+
+        let json = serde_json::to_value(
+            request(
+                "report-progress",
+                &[
+                    "w1:p1",
+                    "--source",
+                    "s",
+                    "--seq",
+                    "9",
+                    "--items-json",
+                    r#"[{"id":"1","text":"A","status":"completed"},{"text":"B"}]"#,
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["method"], "pane.report_progress");
+        assert_eq!(
+            json["params"]["items"],
+            serde_json::json!([
+                {"id": "1", "text": "A", "status": "completed"},
+                {"text": "B", "status": "pending"}
+            ])
+        );
+        let json = serde_json::to_value(
+            request(
+                "report-progress",
+                &["w1:p1", "--source", "s", "--items-json", "[]"],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(json["params"]["items"], serde_json::json!([]));
+        assert!(request("report-progress", &["w1:p1", "--source", "s"]).is_err());
+        assert!(request(
+            "report-progress",
+            &["w1:p1", "--source", "s", "--items-json", "{oops"]
+        )
+        .is_err());
+        assert!(request(
+            "report-progress",
+            &["w1:p1", "--source", "s", "--items-json", r#"[{"id":"1"}]"#]
+        )
+        .is_err());
+    }
+
     #[test]
     fn pane_projection_help_and_invalid_syntax_do_not_use_transport() {
         for leaf in bindings::LEAVES {
@@ -1092,6 +1203,8 @@ mod tests {
             "report-agent-session",
             "release-agent",
             "report-metadata",
+            "report-progress",
+            "update-progress",
         ] {
             assert_eq!(run_pane_command(&args(&[name])).unwrap(), 2);
         }
