@@ -2,10 +2,12 @@
 # managed by herdr; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # HERDR_INTEGRATION_ID=claude
-# HERDR_INTEGRATION_VERSION=11
+# HERDR_INTEGRATION_VERSION=12
 
 param([string]$Action = "")
 
+# The `progress` action (task checklist) needs a CLI leaf for pane.update_progress
+# and pane.report_progress, which does not exist yet, so it is a no-op here.
 if ($Action -ne "session") { exit 0 }
 if ($env:HERDR_ENV -ne "1") { exit 0 }
 if ([string]::IsNullOrWhiteSpace($env:HERDR_PANE_ID)) { exit 0 }

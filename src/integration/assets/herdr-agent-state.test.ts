@@ -682,3 +682,145 @@ function requestSessionPath(request: unknown): unknown {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
+
+const claudeHookPath = join(import.meta.dir, "claude", "herdr-agent-state.sh");
+
+async function runClaudeProgressHook(payload: unknown, action = "progress") {
+  const proc = Bun.spawn(["sh", claudeHookPath, action], {
+    stdin: new Blob([typeof payload === "string" ? payload : JSON.stringify(payload)]),
+    stdout: "ignore",
+    stderr: "ignore",
+    env: process.env,
+  });
+  await proc.exited;
+  // Let the recording server read the request the hook just sent.
+  await new Promise((resolve) => setTimeout(resolve, 25));
+}
+
+type ProgressRequest = {
+  method: string;
+  params: Record<string, unknown>;
+};
+
+async function claudeProgressRequests(name: string, payloads: unknown[]) {
+  const requests = (await startRecordingServer(name)) as ProgressRequest[];
+  for (const payload of payloads) {
+    await runClaudeProgressHook(payload);
+  }
+  return requests;
+}
+
+const claudePostToolUse = {
+  hook_event_name: "PostToolUse",
+  session_id: "claude-session",
+};
+
+// AC-1.8
+test("Claude progress hook maps TaskCreate to an update_progress append", async () => {
+  const [request, ...rest] = await claudeProgressRequests("claude-create", [
+    {
+      ...claudePostToolUse,
+      tool_name: "TaskCreate",
+      tool_input: { subject: "A", description: "first" },
+      tool_response: { task: { id: "1", subject: "A" } },
+    },
+  ]);
+  expect(rest).toEqual([]);
+  expect(request.method).toBe("pane.update_progress");
+  expect(request.params).toMatchObject({
+    pane_id: "test:p1",
+    source: "herdr:claude",
+    agent: "claude",
+    id: "1",
+    subject: "A",
+    status: "pending",
+  });
+  expect(typeof request.params.seq).toBe("number");
+});
+
+// AC-1.8
+test("Claude progress hook parses a string tool_response and falls back to the response subject", async () => {
+  const [request] = await claudeProgressRequests("claude-create-string", [
+    {
+      ...claudePostToolUse,
+      tool_name: "TaskCreate",
+      tool_input: { description: "no subject here" },
+      tool_response: JSON.stringify({ task: { id: "2", subject: "From response" } }),
+    },
+  ]);
+  expect(request.params).toMatchObject({ id: "2", subject: "From response", status: "pending" });
+});
+
+// AC-1.8
+test("Claude progress hook maps TaskUpdate to a status or subject update", async () => {
+  const requests = await claudeProgressRequests("claude-update", [
+    {
+      ...claudePostToolUse,
+      tool_name: "TaskUpdate",
+      tool_input: { taskId: "1", status: "completed" },
+      tool_response: { success: true },
+    },
+    {
+      ...claudePostToolUse,
+      tool_name: "TaskUpdate",
+      tool_input: { taskId: "2", status: "deleted", subject: "Renamed" },
+      tool_response: "ok",
+    },
+    {
+      ...claudePostToolUse,
+      tool_name: "TaskUpdate",
+      tool_input: { taskId: "3", status: "mystery" },
+    },
+  ]);
+  expect(requests.map((request) => request.method)).toEqual([
+    "pane.update_progress",
+    "pane.update_progress",
+  ]);
+  expect(requests[0].params).toMatchObject({ id: "1", status: "completed" });
+  expect(requests[0].params).not.toHaveProperty("subject");
+  expect(requests[1].params).toMatchObject({ id: "2", status: "deleted", subject: "Renamed" });
+});
+
+// AC-1.8
+test("Claude progress hook maps TaskList to a whole-list report", async () => {
+  const [request] = await claudeProgressRequests("claude-list", [
+    {
+      ...claudePostToolUse,
+      tool_name: "TaskList",
+      tool_input: {},
+      tool_response: {
+        tasks: [
+          { id: "1", subject: "A", status: "completed", blockedBy: [] },
+          { id: "2", subject: "B", status: "in_progress", blockedBy: ["1"] },
+          { id: "3", subject: "C", status: "pending", blockedBy: [] },
+        ],
+      },
+    },
+  ]);
+  expect(request.method).toBe("pane.report_progress");
+  expect(request.params.items).toEqual([
+    { id: "1", text: "A", status: "completed" },
+    { id: "2", text: "B", status: "in_progress" },
+    { id: "3", text: "C", status: "pending" },
+  ]);
+  expect(request.params).toMatchObject({ source: "herdr:claude", agent: "claude" });
+});
+
+// AC-1.8
+test("Claude progress hook forwards subagent calls and ignores malformed or unrelated input", async () => {
+  const requests = await claudeProgressRequests("claude-ignored", [
+    {
+      ...claudePostToolUse,
+      agent_id: "sub-1",
+      tool_name: "TaskUpdate",
+      tool_input: { taskId: "9", status: "completed" },
+    },
+    "not json at all",
+    { ...claudePostToolUse, tool_name: "Bash", tool_input: { command: "ls" } },
+    { ...claudePostToolUse, tool_name: "TaskCreate", tool_input: "garbage", tool_response: 7 },
+    { ...claudePostToolUse, tool_name: "TaskList", tool_response: "not a list" },
+    { hook_event_name: "SessionStart", session_id: "s", tool_name: "TaskList" },
+  ]);
+  expect(requests).toHaveLength(1);
+  expect(requests[0].params).toMatchObject({ id: "9", status: "completed" });
+});
