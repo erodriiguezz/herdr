@@ -2466,9 +2466,12 @@ mod tests {
         assert_eq!(tasks.tasks[0].agent_type.as_deref(), Some("general"));
         assert_eq!(tasks.tasks[0].status, Working);
 
-        app.handle_api_request(report_task_request(&pane_id, 1, Done));
+        app.handle_api_request(report_task_request(&pane_id, 1, Working));
         assert_eq!(list_tasks(&mut app, &pane_id).tasks[0].status, Working);
-        app.handle_api_request(report_task_request(&pane_id, 3, Done));
+        // A finish applies whatever its seq: hook processes race.
+        app.handle_api_request(report_task_request(&pane_id, 1, Done));
+        assert_eq!(list_tasks(&mut app, &pane_id).tasks[0].status, Done);
+        app.handle_api_request(report_task_request(&pane_id, 5, Working));
         assert_eq!(list_tasks(&mut app, &pane_id).tasks[0].status, Done);
 
         let response = app.handle_api_request(report_task_request("pane_missing", 1, Working));

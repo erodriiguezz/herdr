@@ -47,6 +47,8 @@ if hook_input_file:
             hook_input = json.loads(content)
     except Exception:
         hook_input = {}
+if not isinstance(hook_input, dict):
+    hook_input = {}
 
 if "CURSOR_VERSION" in os.environ or "cursor_version" in hook_input:
     raise SystemExit(0)

@@ -22,6 +22,17 @@ try {
 
 $propertyNames = @($payload.PSObject.Properties.Name)
 if ((Test-Path Env:CURSOR_VERSION) -or $propertyNames -ccontains "cursor_version") { exit 0 }
+# Windows PowerShell 5.1 hands native-command arguments to the child without
+# escaping embedded quotes or trailing backslashes, and the task text is model
+# written. Quote free text by the CommandLineToArgvW rules ourselves; a value
+# that already starts and ends with a quote is passed through verbatim.
+function ConvertTo-NativeArg([string]$Value) {
+    $text = $Value -replace "[\r\n]", ""
+    $text = [regex]::Replace($text, '(\\*)"', { param($m) ('\' * (2 * $m.Groups[1].Length)) + '\"' })
+    $text = [regex]::Replace($text, '(\\+)$', { param($m) '\' * (2 * $m.Groups[1].Length) })
+    return '"' + $text + '"'
+}
+
 if ($Action -eq "task") {
     $taskId = $null
     $taskStatus = $null
@@ -57,7 +68,7 @@ if ($Action -eq "task") {
     $taskSeq = [long][DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() * 1000000
     $herdr = if ([string]::IsNullOrWhiteSpace($env:HERDR_BIN_PATH)) { "herdr" } else { $env:HERDR_BIN_PATH }
     try {
-        $args = @(
+        $herdrArgs = @(
             "pane",
             "report-task",
             $env:HERDR_PANE_ID,
@@ -65,12 +76,12 @@ if ($Action -eq "task") {
             "herdr:claude",
             "--seq",
             "$taskSeq",
-            "--task-id=$taskId",
+            (ConvertTo-NativeArg "--task-id=$taskId"),
             "--status",
             $taskStatus
         )
-        if ($null -ne $description) { $args += "--description=$description" }
-        if ($null -ne $agentType) { $args += "--agent-type=$agentType" }
+        if ($null -ne $description) { $herdrArgs += (ConvertTo-NativeArg "--description=$description") }
+        if ($null -ne $agentType) { $herdrArgs += (ConvertTo-NativeArg "--agent-type=$agentType") }
         & $herdr @args 2>$null | Out-Null
     } catch {
     }
@@ -86,7 +97,7 @@ if ([string]::IsNullOrWhiteSpace($sessionId)) { exit 0 }
 $seq = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 $herdr = if ([string]::IsNullOrWhiteSpace($env:HERDR_BIN_PATH)) { "herdr" } else { $env:HERDR_BIN_PATH }
 try {
-    $args = @(
+    $herdrArgs = @(
         "pane",
         "report-agent-session",
         $env:HERDR_PANE_ID,
@@ -100,10 +111,10 @@ try {
         "$sessionId"
     )
     if ($payload.transcript_path -is [string] -and -not [string]::IsNullOrWhiteSpace($payload.transcript_path)) {
-        $args += @("--agent-session-path", "$($payload.transcript_path)")
+        $herdrArgs += @("--agent-session-path", "$($payload.transcript_path)")
     }
     if ($payload.hook_event_name -eq "SessionStart" -and $payload.source -is [string] -and -not [string]::IsNullOrWhiteSpace($payload.source)) {
-        $args += @("--session-start-source", "$($payload.source)")
+        $herdrArgs += @("--session-start-source", "$($payload.source)")
     }
     & $herdr @args 2>$null | Out-Null
 } catch {

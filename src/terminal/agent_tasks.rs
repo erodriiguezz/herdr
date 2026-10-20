@@ -116,10 +116,23 @@ impl AgentTasks {
         let source = clean(Some(report.source), MAX_TASK_ID_CHARS).unwrap_or_default();
 
         if let Some(task) = self.tasks.iter_mut().find(|t| t.task_id == report.task_id) {
-            if source != task.source || report.seq <= task.seq {
+            if source != task.source {
                 return false;
             }
-            task.seq = report.seq;
+            // Seqs come from separate hook processes and do not reflect event
+            // order, so a finish always applies to a running task and a
+            // finished task never goes back to working.
+            let finishing = report.status != AgentTaskStatus::Working;
+            let applies = match (task.status, finishing) {
+                (AgentTaskStatus::Working, true) => true,
+                (AgentTaskStatus::Working, false) => report.seq > task.seq,
+                (_, true) => report.seq > task.seq,
+                (_, false) => false,
+            };
+            if !applies {
+                return false;
+            }
+            task.seq = task.seq.max(report.seq);
             task.status = report.status;
             task.description = description.or(task.description.take());
             task.agent_type = agent_type.or(task.agent_type.take());
@@ -225,13 +238,37 @@ mod tests {
         start.description = Some("fix bug".into());
         start.branch = Some("feat/x".into());
         assert!(tasks.report(start));
-        assert!(!tasks.report(report("t1", 2, AgentTaskStatus::Done)));
-        assert!(!tasks.report(report("t1", 1, AgentTaskStatus::Done)));
-        assert_eq!(tasks.tasks()[0].status, AgentTaskStatus::Working);
+        assert!(!tasks.report(report("t1", 2, AgentTaskStatus::Working)));
+        assert!(!tasks.report(report("t1", 1, AgentTaskStatus::Working)));
         assert!(tasks.report(report("t1", 3, AgentTaskStatus::Done)));
         assert_eq!(tasks.tasks()[0].status, AgentTaskStatus::Done);
         assert_eq!(tasks.tasks()[0].label(), "fix bug");
         assert_eq!(tasks.tasks()[0].branch.as_deref(), Some("feat/x"));
+        // finished -> finished still follows seq
+        assert!(!tasks.report(report("t1", 3, AgentTaskStatus::Failed)));
+        assert!(tasks.report(report("t1", 4, AgentTaskStatus::Failed)));
+        assert_eq!(tasks.tasks()[0].status, AgentTaskStatus::Failed);
+    }
+
+    // AC-2.1
+    #[test]
+    fn ac_2_1_finish_applies_regardless_of_seq_and_is_final() {
+        for finish_seq in [1, 5, 9] {
+            let mut tasks = AgentTasks::default();
+            // Start stamped later than the finish (delayed hook process).
+            assert!(tasks.report(report("t1", 5, AgentTaskStatus::Working)));
+            assert!(tasks.report(report("t1", finish_seq, AgentTaskStatus::Done)));
+            assert_eq!(tasks.tasks()[0].status, AgentTaskStatus::Done);
+            // A late-delivered start never revives a finished task.
+            assert!(!tasks.report(report("t1", 99, AgentTaskStatus::Working)));
+            assert_eq!(tasks.tasks()[0].status, AgentTaskStatus::Done);
+        }
+        let mut tasks = AgentTasks::default();
+        tasks.report(report("t1", 5, AgentTaskStatus::Working));
+        let mut other = report("t1", 1, AgentTaskStatus::Done);
+        other.source = "other".into();
+        assert!(!tasks.report(other), "cross-source finish is still ignored");
+        assert_eq!(tasks.tasks()[0].status, AgentTaskStatus::Working);
     }
 
     // AC-2.1

@@ -93,7 +93,7 @@ pub(crate) fn install(content: &str, settings_path: &Path, hook_path: &Path) -> 
         "claude settings hooks",
     )?;
     let canonical = canonical_hook_value(hook_path);
-    apply_value_removals(hooks, hook_path, Some(&canonical))?;
+    apply_value_removals(hooks, hook_path, EditKind::Install, Some(&canonical))?;
     ensure_command_hook(
         hooks,
         "SessionStart",
@@ -158,7 +158,7 @@ pub(crate) fn uninstall(
         "claude settings",
         "claude settings hooks",
     )? {
-        removed = apply_value_removals(hooks, hook_path, None)?;
+        removed = apply_value_removals(hooks, hook_path, EditKind::Uninstall, None)?;
     }
 
     if !removed {
@@ -177,11 +177,12 @@ pub(crate) fn uninstall(
 fn apply_value_removals(
     hooks: &mut Map<String, Value>,
     hook_path: &Path,
+    kind: EditKind,
     canonical: Option<&Value>,
 ) -> io::Result<bool> {
     let mut removed = false;
     for policy in HOOK_REMOVALS {
-        let commands = removal_commands(policy, hook_path, canonical.is_none());
+        let commands = removal_commands(policy, hook_path, kind == EditKind::Uninstall);
         removed |= remove_value_event_commands(
             hooks,
             policy.event,

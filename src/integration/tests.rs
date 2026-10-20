@@ -1471,11 +1471,67 @@ fn claude_task_cases() -> Vec<ClaudeTaskCase> {
             expected: None,
         },
         ClaudeTaskCase {
+            name: "embedded quotes",
+            payload: r#"{"hook_event_name":"PostToolUse","tool_name":"Agent","tool_input":{"description":"say \"hi\""},"tool_response":{"status":"async_launched","agentId":"agent-txt"}}"#,
+            expected: Some(("agent-txt", "working", Some("say \"hi\""), None)),
+        },
+        ClaudeTaskCase {
+            name: "quote injecting another flag",
+            payload: r#"{"hook_event_name":"PostToolUse","tool_name":"Agent","tool_input":{"description":"x\" --status \"failed"},"tool_response":{"status":"async_launched","agentId":"agent-txt"}}"#,
+            expected: Some(("agent-txt", "working", Some("x\" --status \"failed"), None)),
+        },
+        ClaudeTaskCase {
+            name: "trailing backslash",
+            payload: r#"{"hook_event_name":"PostToolUse","tool_name":"Agent","tool_input":{"description":"C:\\dir\\"},"tool_response":{"status":"async_launched","agentId":"agent-txt"}}"#,
+            expected: Some(("agent-txt", "working", Some("C:\\dir\\"), None)),
+        },
+        ClaudeTaskCase {
+            name: "non-ASCII text",
+            payload: r#"{"hook_event_name":"PostToolUse","tool_name":"Agent","tool_input":{"description":"日本語 é"},"tool_response":{"status":"async_launched","agentId":"agent-txt"}}"#,
+            expected: Some(("agent-txt", "working", Some("日本語 é"), None)),
+        },
+        ClaudeTaskCase {
+            name: "newline in text",
+            payload: r#"{"hook_event_name":"PostToolUse","tool_name":"Agent","tool_input":{"description":"a\nb"},"tool_response":{"status":"async_launched","agentId":"agent-txt"}}"#,
+            expected: Some(("agent-txt", "working", Some("a\nb"), None)),
+        },
+        ClaudeTaskCase {
+            name: "non-object payload",
+            payload: "[1,2]",
+            expected: None,
+        },
+        ClaudeTaskCase {
             name: "unrelated event",
             payload: r#"{"hook_event_name":"SessionStart","session_id":"s","agent_id":"a"}"#,
             expected: None,
         },
     ]
+}
+
+/// CommandLineToArgvW quoting, as the `.ps1` hook applies to free text; CR and
+/// LF are dropped.
+#[cfg(windows)]
+fn windows_native_arg(value: &str) -> String {
+    let mut out = String::from("\"");
+    let mut backslashes = 0;
+    for c in value.chars().filter(|c| *c != '\r' && *c != '\n') {
+        match c {
+            '\\' => backslashes += 1,
+            '"' => {
+                out.push_str(&"\\".repeat(backslashes * 2 + 1));
+                out.push('"');
+                backslashes = 0;
+            }
+            _ => {
+                out.push_str(&"\\".repeat(backslashes));
+                out.push(c);
+                backslashes = 0;
+            }
+        }
+    }
+    out.push_str(&"\\".repeat(backslashes * 2));
+    out.push('"');
+    out
 }
 
 // AC-2.8
@@ -1589,7 +1645,14 @@ fn ac_2_8_claude_sh_task_action_needs_herdr_env() {
         .stdin
         .take()
         .unwrap()
-        .write_all(claude_task_cases()[5].payload.as_bytes())
+        .write_all(
+            claude_task_cases()
+                .iter()
+                .find(|case| case.name == "subagent stop")
+                .unwrap()
+                .payload
+                .as_bytes(),
+        )
         .unwrap();
     let output = child.wait_with_output().unwrap();
     assert!(output.status.success());
