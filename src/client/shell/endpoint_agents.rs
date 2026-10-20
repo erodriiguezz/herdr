@@ -62,7 +62,12 @@ pub(super) fn render_expanded(
     ) {
         return;
     }
-    let rows = agent_rows(endpoints, active_endpoint_id, config, Some(collapsed_tasks));
+    let rows = agent_rows(
+        endpoints,
+        active_endpoint_id,
+        config,
+        Some((collapsed_tasks, area.width)),
+    );
     super::agent_sidebar::render_agent_list(
         buffer,
         area,
@@ -110,7 +115,7 @@ impl ClientShellState {
             &self.endpoints,
             &self.active_endpoint_id,
             &self.config,
-            Some(&self.collapsed_agent_tasks),
+            Some((&self.collapsed_agent_tasks, self.hits.agent_body.width)),
         );
         let Some(target) = rows
             .iter()
@@ -136,19 +141,19 @@ impl ClientShellState {
     }
 }
 
-struct EndpointAgentRow {
+struct EndpointAgentRow<'a> {
     endpoint_id: ClientEndpointId,
     machine_label: String,
     stale: bool,
-    agent: super::agent_sidebar::AgentRow,
+    agent: super::agent_sidebar::AgentRow<'a>,
 }
 
-fn agent_rows(
-    endpoints: &[ClientShellEndpoint],
+fn agent_rows<'a>(
+    endpoints: &'a [ClientShellEndpoint],
     active_endpoint_id: &ClientEndpointId,
     config: &ClientShellConfig,
-    collapsed_tasks: Option<&HashMap<ClientEndpointId, HashSet<String>>>,
-) -> Vec<EndpointAgentRow> {
+    collapsed_tasks: Option<(&'a HashMap<ClientEndpointId, HashSet<String>>, u16)>,
+) -> Vec<EndpointAgentRow<'a>> {
     let mut rendered_rows = endpoints
         .iter()
         .filter_map(|endpoint| {
@@ -162,9 +167,9 @@ fn agent_rows(
                             &agent.pane_id,
                             config,
                             Some(&endpoint.label),
-                            collapsed_tasks.map(|collapsed| {
+                            collapsed_tasks.map(|(collapsed, width)| {
                                 super::agent_sidebar::AgentTaskSource::for_endpoint(
-                                    endpoint, collapsed,
+                                    endpoint, collapsed, width,
                                 )
                             }),
                         )

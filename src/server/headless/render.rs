@@ -558,6 +558,8 @@ impl HeadlessServer {
         }
 
         let mut broken_clients: Vec<u64> = Vec::new();
+        // Built lazily, at most once per render pass, shared by every capable client.
+        let mut agent_tasks_cache: Option<std::collections::BTreeMap<_, _>> = None;
         for (client_id, (cols, rows), cell_size, _is_foreground, mode) in render_targets {
             #[cfg(unix)]
             if matches!(mode, ClientConnectionMode::TerminalObserve { .. })
@@ -649,6 +651,16 @@ impl HeadlessServer {
                 // redraw travel together; the revision compare is the only per-frame cost.
                 let tasks_dirty = client.shell_agent_tasks_enabled
                     && client.shell_agent_tasks_revision != self.app.state.agent_tasks_revision;
+                let tasks_pane_set_changed = client.shell_agent_tasks_enabled
+                    && !tasks_dirty
+                    && client.shell_snapshot.as_ref().is_some_and(|previous| {
+                        previous.panes.len() != candidate.panes.len()
+                            || previous
+                                .panes
+                                .iter()
+                                .zip(&candidate.panes)
+                                .any(|(a, b)| a.pane_id != b.pane_id)
+                    });
                 if client.shell_snapshot.as_ref() != Some(&candidate)
                     || client.shell_agent_completions.as_ref() != Some(&completions)
                     || client.shell_agent_view != agent_view
@@ -659,19 +671,23 @@ impl HeadlessServer {
                     candidate.revision = client.shell_projection_revision;
                     completions.revision = candidate.revision;
                     let mut agent_tasks_update = None;
-                    if client.shell_agent_tasks_enabled {
-                        let mut tasks = crate::server::client_shell::agent_tasks_projection(
-                            &self.app,
-                            &candidate.boot_id,
-                            candidate.revision,
-                        );
+                    // Title and spinner changes alter the snapshot but never the task map,
+                    // so only a revision bump or a different pane set justifies a rebuild.
+                    if tasks_dirty || tasks_pane_set_changed {
+                        let map = agent_tasks_cache.get_or_insert_with(|| {
+                            crate::server::client_shell::agent_tasks_projection(&self.app)
+                        });
                         let unchanged = client
                             .shell_agent_tasks
                             .as_ref()
-                            .map_or(tasks.tasks.is_empty(), |sent| sent.tasks == tasks.tasks);
+                            .map_or(map.is_empty(), |sent| sent.tasks == *map);
                         if !unchanged {
-                            tasks.revision = candidate.revision;
-                            agent_tasks_update = Some(tasks);
+                            agent_tasks_update =
+                                Some(crate::protocol::endpoint::EndpointAgentTasks {
+                                    boot_id: candidate.boot_id.clone(),
+                                    revision: candidate.revision,
+                                    tasks: map.clone(),
+                                });
                         }
                     }
                     let tasks_framed = match agent_tasks_update

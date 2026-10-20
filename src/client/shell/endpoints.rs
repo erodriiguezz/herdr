@@ -727,6 +727,18 @@ impl ClientShellState {
         else {
             return;
         };
+        // Forget collapse state for panes that left the snapshot.
+        if let Some(collapsed) = self.collapsed_agent_tasks.get_mut(endpoint_id) {
+            collapsed.retain(|pane_id| {
+                snapshot
+                    .agents
+                    .iter()
+                    .any(|agent| &agent.pane_id == pane_id)
+            });
+            if collapsed.is_empty() {
+                self.collapsed_agent_tasks.remove(endpoint_id);
+            }
+        }
         if endpoint_id == &self.active_endpoint_id {
             self.apply_active_snapshot(snapshot, generation);
         }

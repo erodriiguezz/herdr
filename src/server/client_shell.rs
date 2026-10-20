@@ -14,13 +14,18 @@ pub(super) fn snapshot(
     snapshot_with_completions(app, boot_id, revision, config_diagnostic, location).0
 }
 
-/// Background tasks per public pane id. Walks panes, so callers run it only when
-/// `AppState::agent_tasks_revision` moved or the pane set changed, never per frame.
+#[cfg(test)]
+thread_local! {
+    pub(super) static PROJECTION_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Background tasks per public pane id. Walks every pane, so callers run it at most once per
+/// render pass, and only when `AppState::agent_tasks_revision` moved or the pane set changed.
 pub(super) fn agent_tasks_projection(
     app: &app::App,
-    boot_id: &str,
-    revision: u64,
-) -> protocol::endpoint::EndpointAgentTasks {
+) -> std::collections::BTreeMap<String, Vec<protocol::endpoint::EndpointAgentTask>> {
+    #[cfg(test)]
+    PROJECTION_BUILDS.with(|builds| builds.set(builds.get() + 1));
     use protocol::endpoint::{EndpointAgentTask, EndpointAgentTaskStatus};
 
     use crate::api::schema::AgentTaskStatus;
@@ -57,11 +62,7 @@ pub(super) fn agent_tasks_projection(
             }
         }
     }
-    protocol::endpoint::EndpointAgentTasks {
-        boot_id: boot_id.to_owned(),
-        revision,
-        tasks,
-    }
+    tasks
 }
 
 pub(super) fn snapshot_with_completions(

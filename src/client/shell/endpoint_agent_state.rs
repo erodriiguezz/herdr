@@ -41,6 +41,18 @@ impl EndpointAgentPresentation {
     }
 
     pub(super) fn receive_tasks(&mut self, generation: Option<u64>, tasks: EndpointAgentTasks) {
+        // Keep the newest projection of one connection; a stale one never replaces it.
+        if self
+            .pending_tasks
+            .as_ref()
+            .is_some_and(|(current_generation, current)| {
+                *current_generation == generation
+                    && current.boot_id == tasks.boot_id
+                    && current.revision >= tasks.revision
+            })
+        {
+            return;
+        }
         self.pending_tasks = Some((generation, tasks));
     }
 
@@ -87,16 +99,16 @@ impl EndpointAgentPresentation {
             .retain(|pane_id, _| pane_ids.contains(pane_id.as_str()));
         self.working
             .retain(|pane_id| pane_ids.contains(pane_id.as_str()));
-        if let Some((_, tasks)) =
-            self.pending_tasks
-                .take()
-                .filter(|(received_generation, projection)| {
-                    *received_generation == generation
-                        && projection.boot_id == snapshot.boot_id
-                        && projection.revision == snapshot.revision
-                })
-        {
-            self.tasks = tasks.tasks;
+        // Tasks are only sent on change, so a projection applies to the first snapshot at
+        // or after its revision instead of needing an exact pair.
+        if let Some((received_generation, projection)) = self.pending_tasks.take() {
+            if received_generation == generation && projection.boot_id == snapshot.boot_id {
+                if projection.revision <= snapshot.revision {
+                    self.tasks = projection.tasks;
+                } else {
+                    self.pending_tasks = Some((received_generation, projection));
+                }
+            }
         }
         let completions = self
             .pending_completions
@@ -323,7 +335,10 @@ mod tests {
         let mut presentation = EndpointAgentPresentation::default();
         presentation.receive_tasks(None, tasks(2, "first"));
         presentation.project_snapshot(&mut snapshot(AgentStatus::Working, 1, 1));
-        assert!(presentation.agent_tasks().is_empty(), "revision mismatch");
+        assert!(
+            presentation.agent_tasks().is_empty(),
+            "newer than the snapshot: wait"
+        );
 
         presentation.receive_tasks(None, tasks(2, "first"));
         presentation.project_snapshot(&mut snapshot(AgentStatus::Working, 1, 2));
@@ -331,6 +346,31 @@ mod tests {
 
         presentation.project_snapshot(&mut snapshot(AgentStatus::Working, 1, 3));
         assert_eq!(presentation.agent_tasks()["pane"][0].label, "first");
+    }
+
+    #[test]
+    fn agent_tasks_projection_survives_a_missed_exact_pairing_and_ignores_stale() {
+        let tasks = |revision: u64, label: &str| EndpointAgentTasks {
+            boot_id: "endpoint-boot".into(),
+            revision,
+            tasks: [(
+                "pane".to_owned(),
+                vec![EndpointAgentTask {
+                    task_id: "t".into(),
+                    label: label.into(),
+                    agent_type: None,
+                    status: crate::protocol::endpoint::EndpointAgentTaskStatus::Done,
+                }],
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let mut presentation = EndpointAgentPresentation::default();
+        // The snapshot revision skipped past the companion's revision.
+        presentation.receive_tasks(None, tasks(2, "newest"));
+        presentation.receive_tasks(None, tasks(1, "stale"));
+        presentation.project_snapshot(&mut snapshot(AgentStatus::Working, 1, 5));
+        assert_eq!(presentation.agent_tasks()["pane"][0].label, "newest");
     }
 
     #[test]

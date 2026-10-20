@@ -5,12 +5,15 @@ use crate::protocol::endpoint::{
     EndpointAgentTaskStatus, EndpointAgentTasks, AGENT_TASKS_KIND, ENDPOINT_SNAPSHOT_KIND,
 };
 
-fn connect(
-    server: &mut HeadlessServer,
-    client_id: u64,
-    agent_tasks: bool,
-) -> std::sync::mpsc::Receiver<Vec<u8>> {
-    let (writer, control_rx, _render_rx) = test_client_writer();
+struct TestClient {
+    id: u64,
+    control: std::sync::mpsc::Receiver<Vec<u8>>,
+    /// Held so the writer thread keeps running for the whole test.
+    _render: std::sync::mpsc::Receiver<Vec<u8>>,
+}
+
+fn connect(server: &mut HeadlessServer, client_id: u64, agent_tasks: bool) -> TestClient {
+    let (writer, control, render) = test_client_writer();
     server.handle_server_event(ServerEvent::ClientShellConnected {
         surface_reuse: false,
         surface_delta: false,
@@ -28,19 +31,43 @@ fn connect(
         surface_active: false,
         writer,
     });
-    control_rx
+    TestClient {
+        id: client_id,
+        control,
+        _render: render,
+    }
 }
 
-/// Every endpoint control message queued so far, as `(kind, data)`.
-fn drain_controls(rx: &std::sync::mpsc::Receiver<Vec<u8>>) -> Vec<(String, String)> {
+const BARRIER: &str = "test.barrier";
+
+/// Every endpoint control message queued so far, as `(kind, data)`. The writer queue is
+/// FIFO, so a barrier queued now arrives after everything sent before it.
+fn drain_controls(server: &HeadlessServer, client: &TestClient) -> Vec<(String, String)> {
+    let barrier = HeadlessServer::frame_server_message(&ServerMessage::EndpointControl {
+        kind: BARRIER.into(),
+        data: String::new(),
+    })
+    .expect("frame barrier");
+    server.clients[&client.id]
+        .writer
+        .as_ref()
+        .expect("client writer")
+        .control
+        .send(barrier)
+        .expect("queue barrier");
     let mut controls = Vec::new();
-    // The writer hands control frames over asynchronously, so wait briefly for stragglers.
-    while let Ok(bytes) = rx.recv_timeout(Duration::from_millis(100)) {
+    loop {
+        let bytes = client
+            .control
+            .recv_timeout(Duration::from_secs(5))
+            .expect("barrier must arrive");
         if let ServerMessage::EndpointControl { kind, data } = read_server_message(bytes) {
+            if kind == BARRIER {
+                return controls;
+            }
             controls.push((kind, data));
         }
     }
-    controls
 }
 
 fn task_messages(controls: &[(String, String)]) -> Vec<EndpointAgentTasks> {
@@ -89,10 +116,10 @@ fn server_with_two_workspaces() -> (HeadlessServer, String) {
 async fn ac_2_7_agent_tasks_companion_is_opt_in_and_sent_only_on_change() {
     let (mut server, pane) = server_with_two_workspaces();
     server.app.acknowledge_focused_agent_tasks();
-    let old_rx = connect(&mut server, 1, false);
-    let new_rx = connect(&mut server, 2, true);
-    assert!(task_messages(&drain_controls(&old_rx)).is_empty());
-    let seed = task_messages(&drain_controls(&new_rx));
+    let old = connect(&mut server, 1, false);
+    let new_client = connect(&mut server, 2, true);
+    assert!(task_messages(&drain_controls(&server, &old)).is_empty());
+    let seed = task_messages(&drain_controls(&server, &new_client));
     assert_eq!(seed.len(), 1, "capable clients get a baseline on connect");
     assert!(seed[0].tasks.is_empty());
 
@@ -101,10 +128,10 @@ async fn ac_2_7_agent_tasks_companion_is_opt_in_and_sent_only_on_change() {
 
     // A client without the capability sees no change at all: no companion and the v1
     // snapshot it already holds stays current.
-    assert!(drain_controls(&old_rx).is_empty());
+    assert!(drain_controls(&server, &old).is_empty());
 
     // A client with it gets exactly one companion, paired with the snapshot revision.
-    let new = drain_controls(&new_rx);
+    let new = drain_controls(&server, &new_client);
     let sent = task_messages(&new);
     assert_eq!(sent.len(), 1);
     let snapshot_revision = serde_json::from_str::<protocol::ClientShellSnapshot>(
@@ -125,35 +152,35 @@ async fn ac_2_7_agent_tasks_companion_is_opt_in_and_sent_only_on_change() {
     server.render_and_stream();
     report(&mut server, &pane, 1, AgentTaskStatus::Working);
     server.render_and_stream();
-    assert!(task_messages(&drain_controls(&new_rx)).is_empty());
+    assert!(task_messages(&drain_controls(&server, &new_client)).is_empty());
 
     // A real change sends one more, and the old client still gets none.
     report(&mut server, &pane, 2, AgentTaskStatus::Done);
     server.render_and_stream();
-    let controls = drain_controls(&new_rx);
+    let controls = drain_controls(&server, &new_client);
     let sent = task_messages(&controls);
     assert_eq!(sent.len(), 1);
     assert_eq!(
         sent[0].tasks[&pane][0].status,
         EndpointAgentTaskStatus::Done
     );
-    assert!(drain_controls(&old_rx).is_empty());
+    assert!(drain_controls(&server, &old).is_empty());
 
     // Focusing the pane drops the finished task and the empty list is sent once.
     server.app.state.active = Some(1);
     assert!(server.app.acknowledge_focused_agent_tasks());
     server.render_and_stream();
-    let sent = task_messages(&drain_controls(&new_rx));
+    let sent = task_messages(&drain_controls(&server, &new_client));
     assert_eq!(sent.len(), 1);
     assert!(sent[0].tasks.is_empty());
     server.render_and_stream();
-    assert!(task_messages(&drain_controls(&new_rx)).is_empty());
+    assert!(task_messages(&drain_controls(&server, &new_client)).is_empty());
 
     // A client that connects later is seeded with the existing list, before its snapshot.
     report(&mut server, &pane, 3, AgentTaskStatus::Working);
     server.render_and_stream();
-    let seeded_rx = connect(&mut server, 3, true);
-    let controls = drain_controls(&seeded_rx);
+    let seeded = connect(&mut server, 3, true);
+    let controls = drain_controls(&server, &seeded);
     let kinds: Vec<&str> = controls.iter().map(|(kind, _)| kind.as_str()).collect();
     let tasks_at = kinds.iter().position(|kind| *kind == AGENT_TASKS_KIND);
     let snapshot_at = kinds
@@ -164,4 +191,46 @@ async fn ac_2_7_agent_tasks_companion_is_opt_in_and_sent_only_on_change() {
         "companion precedes the snapshot: {kinds:?}"
     );
     assert_eq!(task_messages(&controls)[0].tasks[&pane].len(), 1);
+}
+
+// AC-2.7
+#[tokio::test]
+async fn ac_2_7_projection_is_built_once_per_pass_and_not_for_title_changes() {
+    use crate::server::client_shell::PROJECTION_BUILDS;
+    let builds = || PROJECTION_BUILDS.with(std::cell::Cell::get);
+    let (mut server, pane) = server_with_two_workspaces();
+    server.app.acknowledge_focused_agent_tasks();
+    let first = connect(&mut server, 1, true);
+    let second = connect(&mut server, 2, true);
+    drain_controls(&server, &first);
+    drain_controls(&server, &second);
+
+    let before = builds();
+    report(&mut server, &pane, 1, AgentTaskStatus::Working);
+    server.render_and_stream();
+    assert_eq!(builds() - before, 1, "one build shared by both clients");
+    assert_eq!(task_messages(&drain_controls(&server, &first)).len(), 1);
+    assert_eq!(task_messages(&drain_controls(&server, &second)).len(), 1);
+
+    // A label change alters every snapshot but cannot alter the task map.
+    let before = builds();
+    server.app.state.workspaces[0].set_custom_name("renamed".into());
+    server.render_and_stream();
+    assert_eq!(builds(), before, "title-like changes never rebuild");
+    let controls = drain_controls(&server, &first);
+    assert!(controls
+        .iter()
+        .any(|(kind, _)| kind == ENDPOINT_SNAPSHOT_KIND));
+    assert!(task_messages(&controls).is_empty());
+
+    // A different pane set does rebuild.
+    let before = builds();
+    server
+        .app
+        .state
+        .workspaces
+        .push(crate::workspace::Workspace::test_new("c"));
+    server.app.state.ensure_test_terminals();
+    server.render_and_stream();
+    assert_eq!(builds() - before, 1);
 }

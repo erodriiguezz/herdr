@@ -435,7 +435,11 @@ pub(crate) fn render_sidebar(
         .iter()
         .find(|endpoint| &endpoint.endpoint_id == state.active_endpoint_id);
     let tasks = endpoint.map(|endpoint| {
-        super::agent_sidebar::AgentTaskSource::for_endpoint(endpoint, state.collapsed_agent_tasks)
+        super::agent_sidebar::AgentTaskSource::for_endpoint(
+            endpoint,
+            state.collapsed_agent_tasks,
+            detail_area.width,
+        )
     });
     super::render_agent_panel(
         buffer,

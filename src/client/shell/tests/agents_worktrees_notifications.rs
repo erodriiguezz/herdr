@@ -1762,7 +1762,6 @@ fn ac_2_5_agent_with_tasks_renders_tree_rows_and_collapses_to_rollup() {
     assert!(expanded.contains("├─ ◐ Review the diff"), "{expanded}");
     assert!(expanded.contains("└─ ✓ Write the tests"), "{expanded}");
     assert!(expanded.contains('▾'), "{expanded}");
-    println!("--- expanded ---\n{expanded}");
 
     let toggle = state.hits.agent_task_toggles[0].0;
     click(&mut state, toggle.x, toggle.y);
@@ -1774,8 +1773,6 @@ fn ac_2_5_agent_with_tasks_renders_tree_rows_and_collapses_to_rollup() {
         collapsed.contains("◐ ▸"),
         "working outranks done: {collapsed}"
     );
-    println!("--- collapsed ---\n{collapsed}");
-
     let mut failing = shell_with_tasks(vec![
         task("a", "x", Working),
         task(
@@ -1847,4 +1844,18 @@ fn ac_2_6_child_click_focuses_parent_and_toggle_click_only_collapses() {
     click(&mut state, toggle.x, toggle.y);
     let again = frame_lines(&state.compose(106, 30).unwrap()).join("\n");
     assert!(again.contains("Write the tests"), "toggle expands again");
+}
+
+// AC-2.6
+#[test]
+fn ac_2_6_collapse_state_is_forgotten_for_panes_that_left_the_snapshot() {
+    use crate::protocol::endpoint::EndpointAgentTaskStatus::Working;
+    let mut state = shell_with_tasks(vec![task("a", "x", Working)]);
+    state
+        .collapsed_agent_tasks
+        .entry(ClientEndpointId::Local)
+        .or_default()
+        .insert("pane_1".into());
+    state.set_snapshot(Box::new(snapshot()));
+    assert!(state.collapsed_agent_tasks.is_empty());
 }

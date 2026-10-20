@@ -12,22 +12,23 @@ use super::*;
 use crate::api::schema::AgentStatus;
 use crate::protocol::endpoint::{EndpointAgentTask, EndpointAgentTaskStatus};
 
-pub(super) struct AgentRow {
+pub(super) struct AgentRow<'a> {
     pub(super) pane_id: String,
     pub(super) status: crate::api::schema::AgentStatus,
     pub(super) focused: bool,
     pub(super) rows: Vec<Vec<crate::ui::ResolvedToken>>,
     /// Background tasks drawn as child rows. Empty for most agents.
-    tasks: Vec<AgentTaskLine>,
+    tasks: Vec<AgentTaskLine<'a>>,
     tasks_collapsed: bool,
+    toggle_fits: bool,
 }
 
-struct AgentTaskLine {
+struct AgentTaskLine<'a> {
     status: AgentStatus,
-    label: String,
+    label: &'a str,
 }
 
-impl AgentRow {
+impl AgentRow<'_> {
     /// Terminal lines the row occupies: its label rows plus visible task children.
     pub(super) fn line_count(&self) -> usize {
         self.rows.len().max(1)
@@ -44,20 +45,33 @@ impl AgentRow {
 pub(super) struct AgentTaskSource<'a> {
     tasks: &'a BTreeMap<String, Vec<EndpointAgentTask>>,
     collapsed: Option<&'a HashSet<String>>,
+    /// Whether rows are wide enough to carry the collapse toggle.
+    toggle_fits: bool,
 }
+
+/// Narrower rows cannot hold the toggle, so their tasks always stay expanded.
+const MIN_TOGGLE_WIDTH: u16 = 10;
 
 impl<'a> AgentTaskSource<'a> {
     pub(super) fn for_endpoint(
         endpoint: &'a ClientShellEndpoint,
         collapsed: &'a HashMap<ClientEndpointId, HashSet<String>>,
+        panel_width: u16,
     ) -> Self {
         Self {
             tasks: endpoint.agent_presentation.agent_tasks(),
             collapsed: collapsed.get(&endpoint.endpoint_id),
+            // A scrollbar may take one column from the rows.
+            toggle_fits: panel_width.saturating_sub(1) >= MIN_TOGGLE_WIDTH,
         }
     }
 
-    fn lines_for(&self, pane_id: &str) -> (Vec<AgentTaskLine>, bool) {
+    fn lines_for(&self, pane_id: &str) -> (Vec<AgentTaskLine<'a>>, bool) {
+        let (lines, collapsed) = self.lines_for_inner(pane_id);
+        (lines, collapsed && self.toggle_fits)
+    }
+
+    fn lines_for_inner(&self, pane_id: &str) -> (Vec<AgentTaskLine<'a>>, bool) {
         let Some(tasks) = self.tasks.get(pane_id) else {
             return (Vec::new(), false);
         };
@@ -67,7 +81,7 @@ impl<'a> AgentTaskSource<'a> {
             .filter_map(|task| {
                 Some(AgentTaskLine {
                     status: task_agent_status(task.status)?,
-                    label: task.label.clone(),
+                    label: task.label.as_str(),
                 })
             })
             .collect::<Vec<_>>();
@@ -90,7 +104,7 @@ fn task_agent_status(status: EndpointAgentTaskStatus) -> Option<AgentStatus> {
 }
 
 /// Collapsed parents show the most urgent child: failed, then working, then done.
-fn rolled_up_task_status(tasks: &[AgentTaskLine]) -> Option<AgentStatus> {
+fn rolled_up_task_status(tasks: &[AgentTaskLine<'_>]) -> Option<AgentStatus> {
     let rank = |status: AgentStatus| match status {
         AgentStatus::Blocked => 3,
         AgentStatus::Working => 2,
@@ -328,25 +342,25 @@ pub(super) fn render_agent_list<T>(
     }
 }
 
-pub(super) fn agent_rows(
+pub(super) fn agent_rows<'a>(
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
     machine: Option<&str>,
-    tasks: Option<AgentTaskSource<'_>>,
-) -> Vec<AgentRow> {
+    tasks: Option<AgentTaskSource<'a>>,
+) -> Vec<AgentRow<'a>> {
     ordered_agent_pane_ids(snapshot, config.agent_panel_sort)
         .into_iter()
         .filter_map(|pane_id| agent_row(snapshot, &pane_id, config, machine, tasks))
         .collect()
 }
 
-pub(super) fn agent_row(
+pub(super) fn agent_row<'a>(
     snapshot: &ClientShellSnapshot,
     pane_id: &str,
     config: &ClientShellConfig,
     machine: Option<&str>,
-    tasks: Option<AgentTaskSource<'_>>,
-) -> Option<AgentRow> {
+    tasks: Option<AgentTaskSource<'a>>,
+) -> Option<AgentRow<'a>> {
     let agent = snapshot
         .agents
         .iter()
@@ -406,6 +420,7 @@ pub(super) fn agent_row(
         },
         state_text,
     );
+    let tasks_source_fits = tasks.is_some_and(|source| source.toggle_fits);
     let (tasks, tasks_collapsed) = tasks.map_or((Vec::new(), false), |source| {
         source.lines_for(&agent.pane_id)
     });
@@ -416,6 +431,7 @@ pub(super) fn agent_row(
         rows,
         tasks,
         tasks_collapsed,
+        toggle_fits: tasks_source_fits,
     })
 }
 
@@ -462,11 +478,7 @@ pub(super) fn render_agent_row(
         (false, false) => 2,
         (false, true) => 4,
     };
-    let toggle_reserve = if rect.width >= toggle_reserve + 6 {
-        toggle_reserve
-    } else {
-        0
-    };
+    let toggle_reserve = if row.toggle_fits { toggle_reserve } else { 0 };
     for (index, tokens) in rows.iter().take(rect.height as usize).enumerate() {
         let indent = if index == 0 { 1 } else { 3 };
         let reserve = if index == 0 { toggle_reserve } else { 0 };
@@ -554,7 +566,7 @@ pub(super) fn render_agent_row(
             x,
             y,
             rect.right().saturating_sub(x),
-            &task.label,
+            task.label,
             label_style,
         );
     }

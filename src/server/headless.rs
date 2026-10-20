@@ -2013,11 +2013,11 @@ impl HeadlessServer {
                 if agent_tasks {
                     connection.shell_agent_tasks_enabled = true;
                     connection.shell_agent_tasks_revision = self.app.state.agent_tasks_revision;
-                    let tasks = crate::server::client_shell::agent_tasks_projection(
-                        &self.app,
-                        &seed_snapshot.boot_id,
-                        seed_snapshot.revision,
-                    );
+                    let tasks = crate::protocol::endpoint::EndpointAgentTasks {
+                        boot_id: seed_snapshot.boot_id.clone(),
+                        revision: seed_snapshot.revision,
+                        tasks: crate::server::client_shell::agent_tasks_projection(&self.app),
+                    };
                     // Always seed, even when empty, so a reconnecting client drops stale tasks.
                     match crate::protocol::endpoint::agent_tasks_message(&tasks) {
                         Ok(message) => tasks_message = Some(message),
