@@ -443,6 +443,54 @@ crate::cli::projection::cli_params! {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskStatus {
+    Working,
+    Done,
+    Failed,
+}
+
+crate::cli::projection::cli_params! {
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+    pub struct PaneReportAgentTaskParams => PaneReportTaskProjection {
+        pub pane_id: String => Field::new(String::new()).input(binding::pane_id()),
+        pub source: String => Field::new(String::new()).input(binding::source()),
+        /// Per-task ordering; a report at or below the stored value is ignored.
+        pub seq: u64 => Field::new(0).input(binding::required_seq()),
+        /// Non-empty, at most 128 characters.
+        pub task_id: String => Field::new(String::new()).input(binding::text("task-id", "ID").required()),
+        pub status: AgentTaskStatus => Field::new(AgentTaskStatus::Working).input(binding::task_status()),
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub description: Option<String> => Field::new(None).input(binding::optional_text("description", "TEXT")),
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub agent_type: Option<String> => Field::new(None).input(binding::optional_text("agent-type", "TYPE")),
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub branch: Option<String> => Field::new(None).input(binding::optional_text("branch", "NAME")),
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub cwd: Option<String> => Field::new(None).input(binding::optional_text("cwd", "PATH").path()),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentTaskInfo {
+    pub task_id: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    pub status: AgentTaskStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneAgentTasks {
+    pub pane_id: String,
+    pub tasks: Vec<AgentTaskInfo>,
+}
+
 crate::cli::projection::cli_params! {
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
     pub struct PaneReportMetadataParams => PaneMetadataProjection {

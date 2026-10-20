@@ -934,6 +934,7 @@ impl App {
         request: crate::api::schema::Request,
     ) -> String {
         self.sync_pending_terminal_titles();
+        self.state.acknowledge_focused_agent_tasks();
         use crate::api::schema::{
             ErrorBody, ErrorResponse, Method, ResponseResult, SuccessResponse,
         };
@@ -1191,6 +1192,12 @@ impl App {
             }
             Method::PaneReportAgentSession(params) => {
                 return self.handle_pane_report_agent_session(request.id, params);
+            }
+            Method::PaneReportAgentTask(params) => {
+                return self.handle_pane_report_agent_task(request.id, params);
+            }
+            Method::PaneAgentTasks(target) => {
+                return self.handle_pane_agent_tasks(request.id, target);
             }
             Method::PaneReportMetadata(params) => {
                 return self.handle_pane_report_metadata(request.id, params);

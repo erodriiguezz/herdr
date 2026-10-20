@@ -499,6 +499,7 @@ impl App {
             workspaces,
             active,
             previous_pane_focus: None,
+            agent_task_focus: None,
             selected,
             mode,
             should_quit: false,

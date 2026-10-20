@@ -796,6 +796,8 @@ pub struct AppState {
     pub workspaces: Vec<Workspace>,
     pub active: Option<usize>,
     pub(crate) previous_pane_focus: Option<PaneFocusTarget>,
+    /// Last focused pane whose finished agent tasks were acknowledged.
+    pub(crate) agent_task_focus: Option<PaneFocusTarget>,
     pub selected: usize,
     pub mode: Mode,
     pub should_quit: bool,
@@ -1042,6 +1044,7 @@ impl AppState {
             workspaces: Vec::new(),
             active: None,
             previous_pane_focus: None,
+            agent_task_focus: None,
             selected: 0,
             mode: Mode::Navigate,
             should_quit: false,

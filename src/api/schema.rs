@@ -123,6 +123,8 @@ operations::define_operations! {
     PaneRead(PaneReadParams) => "pane.read", false, false;
     PaneReportAgent(PaneReportAgentParams) => "pane.report_agent", true, false;
     PaneReportAgentSession(PaneReportAgentSessionParams) => "pane.report_agent_session", true, false;
+    PaneReportAgentTask(PaneReportAgentTaskParams) => "pane.report_agent_task", true, false;
+    PaneAgentTasks(PaneTarget) => "pane.agent_tasks", false, false;
     PaneReportMetadata(PaneReportMetadataParams) => "pane.report_metadata", true, false;
     PaneClearAgentAuthority(PaneClearAgentAuthorityParams) => "pane.clear_agent_authority", true, false;
     PaneReleaseAgent(PaneReleaseAgentParams) => "pane.release_agent", true, false;
