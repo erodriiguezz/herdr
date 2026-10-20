@@ -3020,3 +3020,138 @@ fn navigator_foreign_workspace_heading_keeps_the_workspace_target() {
         }] if activated == &endpoint_id && workspace_id == "ws_1"
     ));
 }
+
+fn endpoint_task(label: &str) -> crate::protocol::endpoint::EndpointAgentTask {
+    crate::protocol::endpoint::EndpointAgentTask {
+        task_id: label.into(),
+        label: label.into(),
+        agent_type: None,
+        status: crate::protocol::endpoint::EndpointAgentTaskStatus::Working,
+    }
+}
+
+// AC-2.6
+#[test]
+fn ac_2_6_two_endpoints_collapse_independently_and_child_click_focuses_the_parent() {
+    let (mut state, remote) = state_with_remote();
+    let mut local = snapshot();
+    local.agents = vec![agent("local agent", AgentStatus::Working, 1)];
+    state.set_snapshot(Box::new(local));
+    let mut projection = snapshot();
+    projection.boot_id = "remote-boot".into();
+    projection.agents = vec![agent("remote agent", AgentStatus::Working, 1)];
+    state.set_endpoint_snapshot(&remote, Box::new(projection));
+    for (endpoint, label) in [
+        (ClientEndpointId::Local, "local task"),
+        (remote.clone(), "remote task"),
+    ] {
+        state
+            .endpoints
+            .iter_mut()
+            .find(|candidate| candidate.endpoint_id == endpoint)
+            .unwrap()
+            .agent_presentation
+            .set_test_tasks(
+                [("pane_1".to_owned(), vec![endpoint_task(label)])]
+                    .into_iter()
+                    .collect(),
+            );
+    }
+    let text = |state: &mut ClientShellState| {
+        let frame = state.compose(100, 40).unwrap();
+        frame
+            .cells
+            .chunks(frame.width as usize)
+            .map(|row| {
+                row.iter()
+                    .map(|cell| cell.symbol.as_str())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let rendered = text(&mut state);
+    assert!(rendered.contains("local task") && rendered.contains("remote task"));
+    assert_eq!(state.hits.agent_task_toggles.len(), 2);
+
+    // Same pane id on both machines: collapsing one leaves the other alone.
+    let (rect, endpoint_id, _) = state
+        .hits
+        .agent_task_toggles
+        .iter()
+        .find(|(_, endpoint, _)| endpoint == &remote)
+        .cloned()
+        .unwrap();
+    assert_eq!(endpoint_id, remote);
+    let outcome =
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x,
+            row: rect.y,
+            modifiers: KeyModifiers::empty(),
+        })]);
+    assert!(outcome.actions.is_empty() && outcome.repaint);
+    let rendered = text(&mut state);
+    assert!(rendered.contains("local task"));
+    assert!(!rendered.contains("remote task"));
+
+    // A child row click goes through the endpoint agent hit and focuses its parent pane.
+    let lines: Vec<&str> = rendered.lines().collect();
+    let child_y = lines
+        .iter()
+        .position(|line| line.contains("local task"))
+        .unwrap() as u16;
+    let outcome =
+        state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 6,
+            row: child_y,
+            modifiers: KeyModifiers::empty(),
+        })]);
+    assert!(
+        matches!(
+            &outcome.actions[..],
+            [ClientShellAction::ActivateEndpoint {
+                endpoint_id: ClientEndpointId::Local,
+                target: Some(ClientEndpointFocusTarget::Pane(pane)),
+            }] if pane == "pane_1"
+        ),
+        "child click should focus the local parent: {:?}",
+        outcome.actions
+    );
+}
+
+// AC-2.5
+#[test]
+fn ac_2_5_narrow_sidebar_keeps_collapsed_tasks_expanded_without_a_toggle() {
+    let mut config = Config::default();
+    config.ui.sidebar_min_width = 8;
+    config.ui.sidebar_max_width = 8;
+    config.ui.sidebar_width = 8;
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    let mut projected = snapshot();
+    projected.agents = vec![agent("claude", AgentStatus::Working, 1)];
+    state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(surface());
+    state.endpoints[0].agent_presentation.set_test_tasks(
+        [("pane_1".to_owned(), vec![endpoint_task("tiny task")])]
+            .into_iter()
+            .collect(),
+    );
+    state
+        .collapsed_agent_tasks
+        .entry(ClientEndpointId::Local)
+        .or_default()
+        .insert("pane_1".into());
+    let frame = state.compose(100, 30).unwrap();
+    let text: String = frame
+        .cells
+        .iter()
+        .map(|cell| cell.symbol.as_str())
+        .collect();
+    assert!(
+        text.contains("└─"),
+        "tasks stay visible when no toggle fits"
+    );
+    assert!(state.hits.agent_task_toggles.is_empty());
+}

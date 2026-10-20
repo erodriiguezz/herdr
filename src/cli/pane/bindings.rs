@@ -293,6 +293,29 @@ pub(crate) fn resume() -> Input<Option<Vec<String>>> {
     )
 }
 
+const TASK_STATUSES: &[Choice<AgentTaskStatus>] = &[
+    Choice::new("working", AgentTaskStatus::Working),
+    Choice::new("done", AgentTaskStatus::Done),
+    Choice::new("failed", AgentTaskStatus::Failed),
+];
+
+pub(crate) fn task_status() -> Input<AgentTaskStatus> {
+    Input::value("status", "STATUS", |slot, value| {
+        *slot = parse_choice(TASK_STATUSES, "task status", value)?;
+        Ok(())
+    })
+    .required()
+    .configure(|arg| choices(arg, TASK_STATUSES))
+}
+
+pub(crate) fn required_seq() -> Input<u64> {
+    Input::value("seq", "N", |slot, value| {
+        *slot = crate::cli::parse_u64_flag("--seq", value)?;
+        Ok(())
+    })
+    .required()
+}
+
 pub(crate) fn token() -> Input<HashMap<String, Option<String>>> {
     Input::<HashMap<String, Option<String>>>::value("token", "NAME=VALUE", |slot, value| {
         let (key, value) = crate::cli::parse_token_assignment(value)?;
@@ -709,6 +732,26 @@ pub(super) const LEAVES: &[Leaf] = &[
             Ok(Method::PaneReportAgentSession(params))
         },
     },
+    Leaf {
+        name: "report-task",
+        about: "Report a background agent task",
+        id: "cli:request",
+        output: Output::Quiet,
+        arguments: PaneReportTaskProjection::arguments,
+        method: |matches| {
+            let mut params = PaneReportTaskProjection::from_matches(matches)?;
+            params.source = super::source(params.source)?;
+            Ok(Method::PaneReportAgentTask(params))
+        },
+    },
+    leaf!(
+        "tasks",
+        "List background agent tasks of a pane",
+        "cli:pane:tasks",
+        Json,
+        PaneTargetProjection,
+        PaneAgentTasks
+    ),
     Leaf {
         name: "release-agent",
         about: "Release pane agent lifecycle authority",

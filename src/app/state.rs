@@ -796,6 +796,11 @@ pub struct AppState {
     pub workspaces: Vec<Workspace>,
     pub active: Option<usize>,
     pub(crate) previous_pane_focus: Option<PaneFocusTarget>,
+    /// Last focused pane whose finished agent tasks were acknowledged.
+    pub(crate) agent_task_focus: Option<PaneFocusTarget>,
+    /// Bumps whenever any pane's background task list changes (report, acknowledge, clear),
+    /// so endpoint projections can tell a change from a cheap integer compare.
+    pub(crate) agent_tasks_revision: u64,
     pub selected: usize,
     pub mode: Mode,
     pub should_quit: bool,
@@ -1042,6 +1047,8 @@ impl AppState {
             workspaces: Vec::new(),
             active: None,
             previous_pane_focus: None,
+            agent_task_focus: None,
+            agent_tasks_revision: 0,
             selected: 0,
             mode: Mode::Navigate,
             should_quit: false,

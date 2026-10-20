@@ -1,3 +1,4 @@
+pub(crate) mod agent_tasks;
 mod history_read;
 mod id;
 mod runtime;

@@ -31,12 +31,44 @@ pub const AGENT_VIEW_PROJECTION_CAPABILITY: &str = "agent_view_projection";
 pub const AGENT_VIEW_PROJECTION_KIND: &str = "endpoint.agent-view.v1";
 pub const AGENT_COMPLETIONS_CAPABILITY: &str = "agent_completions";
 pub const AGENT_COMPLETIONS_KIND: &str = "endpoint.agent-completions.v1";
+pub const AGENT_TASKS_CAPABILITY: &str = "agent_tasks";
+pub const AGENT_TASKS_KIND: &str = "endpoint.agent-tasks.v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EndpointAgentCompletions {
     pub boot_id: String,
     pub revision: u64,
     pub completions: std::collections::BTreeMap<String, u64>,
+}
+
+/// Optional companion to a V1 snapshot: background tasks agents started, keyed by public
+/// pane id. Sent only to clients that set `EndpointClientHello::agent_tasks`, and only when
+/// the list changed; the client keeps the last map until the next one arrives.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndpointAgentTasks {
+    pub boot_id: String,
+    pub revision: u64,
+    pub tasks: std::collections::BTreeMap<String, Vec<EndpointAgentTask>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndpointAgentTask {
+    pub task_id: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_type: Option<String>,
+    pub status: EndpointAgentTaskStatus,
+}
+
+/// Clients skip tasks whose status they do not know instead of guessing a state for them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EndpointAgentTaskStatus {
+    Working,
+    Done,
+    Failed,
+    #[serde(other)]
+    Unknown,
 }
 
 fn default_true() -> bool {
@@ -64,6 +96,9 @@ pub struct EndpointClientHello {
     /// Accept the optional scroll-aware patch encoding on this connection.
     #[serde(default)]
     pub surface_scroll: bool,
+    /// Accept the optional `endpoint.agent-tasks.v1` companion on this connection.
+    #[serde(default)]
+    pub agent_tasks: bool,
     #[serde(default)]
     pub snapshot_codecs: Vec<String>,
     #[serde(default)]
@@ -110,6 +145,13 @@ pub fn snapshot_message(snapshot: &ClientShellSnapshot) -> serde_json::Result<Se
     Ok(ServerMessage::EndpointControl {
         kind: ENDPOINT_SNAPSHOT_KIND.into(),
         data: serde_json::to_string(snapshot)?,
+    })
+}
+
+pub fn agent_tasks_message(projection: &EndpointAgentTasks) -> serde_json::Result<ServerMessage> {
+    Ok(ServerMessage::EndpointControl {
+        kind: AGENT_TASKS_KIND.into(),
+        data: serde_json::to_string(projection)?,
     })
 }
 
@@ -174,6 +216,7 @@ impl EndpointServerWelcome {
                 HEALTH_CHECK_CAPABILITY.into(),
                 AGENT_VIEW_PROJECTION_CAPABILITY.into(),
                 AGENT_COMPLETIONS_CAPABILITY.into(),
+                AGENT_TASKS_CAPABILITY.into(),
             ],
             error: None,
         }
@@ -215,6 +258,7 @@ mod tests {
             surface_reuse: false,
             surface_delta: false,
             surface_scroll: false,
+            agent_tasks: false,
             snapshot_codecs: vec![SNAPSHOT_CODEC_V1.into()],
             surface_codecs: vec![SURFACE_CODEC_V1.into()],
             input_codecs: vec![INPUT_CODEC_V1.into()],
@@ -364,11 +408,48 @@ mod tests {
         value.as_object_mut().unwrap().remove("surface_reuse");
         value.as_object_mut().unwrap().remove("surface_delta");
         value.as_object_mut().unwrap().remove("surface_scroll");
+        value.as_object_mut().unwrap().remove("agent_tasks");
         let decoded: EndpointClientHello = serde_json::from_value(value).unwrap();
         assert!(decoded.surface_active);
         assert!(!decoded.surface_reuse);
         assert!(!decoded.surface_delta);
         assert!(!decoded.surface_scroll);
+        assert!(!decoded.agent_tasks);
+    }
+
+    #[test]
+    fn agent_tasks_companion_round_trips_and_tolerates_unknown_status() {
+        let projection = EndpointAgentTasks {
+            boot_id: "boot".into(),
+            revision: 4,
+            tasks: [(
+                "pane".to_owned(),
+                vec![EndpointAgentTask {
+                    task_id: "t1".into(),
+                    label: "Review the diff".into(),
+                    agent_type: None,
+                    status: EndpointAgentTaskStatus::Working,
+                }],
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let ServerMessage::EndpointControl { kind, data } =
+            agent_tasks_message(&projection).unwrap()
+        else {
+            panic!("expected optional control");
+        };
+        assert_eq!(kind, AGENT_TASKS_KIND);
+        assert_eq!(
+            serde_json::from_str::<EndpointAgentTasks>(&data).unwrap(),
+            projection
+        );
+        let future = data.replace("\"working\"", "\"paused\"");
+        let decoded: EndpointAgentTasks = serde_json::from_str(&future).unwrap();
+        assert_eq!(
+            decoded.tasks["pane"][0].status,
+            EndpointAgentTaskStatus::Unknown
+        );
     }
 
     #[test]
@@ -385,6 +466,7 @@ mod tests {
                 HEALTH_CHECK_CAPABILITY.to_string(),
                 AGENT_VIEW_PROJECTION_CAPABILITY.to_string(),
                 AGENT_COMPLETIONS_CAPABILITY.to_string(),
+                AGENT_TASKS_CAPABILITY.to_string(),
             ]
         );
     }

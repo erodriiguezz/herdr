@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use ratatui::{
     buffer::Buffer,
@@ -9,12 +9,115 @@ use ratatui::{
 };
 
 use super::*;
+use crate::api::schema::AgentStatus;
+use crate::protocol::endpoint::{EndpointAgentTask, EndpointAgentTaskStatus};
 
-pub(super) struct AgentRow {
+pub(super) struct AgentRow<'a> {
     pub(super) pane_id: String,
     pub(super) status: crate::api::schema::AgentStatus,
     pub(super) focused: bool,
     pub(super) rows: Vec<Vec<crate::ui::ResolvedToken>>,
+    /// Background tasks drawn as child rows. Empty for most agents.
+    tasks: Vec<AgentTaskLine<'a>>,
+    tasks_collapsed: bool,
+    toggle_fits: bool,
+}
+
+struct AgentTaskLine<'a> {
+    status: AgentStatus,
+    label: &'a str,
+}
+
+impl AgentRow<'_> {
+    /// Terminal lines the row occupies: its label rows plus visible task children.
+    pub(super) fn line_count(&self) -> usize {
+        self.rows.len().max(1)
+            + if self.tasks_collapsed {
+                0
+            } else {
+                self.tasks.len()
+            }
+    }
+}
+
+/// Where one endpoint's background tasks and their collapse state live.
+#[derive(Clone, Copy)]
+pub(super) struct AgentTaskSource<'a> {
+    tasks: &'a BTreeMap<String, Vec<EndpointAgentTask>>,
+    collapsed: Option<&'a HashSet<String>>,
+    /// Whether rows are wide enough to carry the collapse toggle.
+    toggle_fits: bool,
+}
+
+/// Narrower rows cannot hold the toggle, so their tasks always stay expanded.
+const MIN_TOGGLE_WIDTH: u16 = 10;
+
+impl<'a> AgentTaskSource<'a> {
+    pub(super) fn for_endpoint(
+        endpoint: &'a ClientShellEndpoint,
+        collapsed: &'a HashMap<ClientEndpointId, HashSet<String>>,
+        panel_width: u16,
+    ) -> Self {
+        Self {
+            tasks: endpoint.agent_presentation.agent_tasks(),
+            collapsed: collapsed.get(&endpoint.endpoint_id),
+            // A scrollbar may take one column from the rows.
+            toggle_fits: panel_width.saturating_sub(1) >= MIN_TOGGLE_WIDTH,
+        }
+    }
+
+    fn lines_for(&self, pane_id: &str) -> (Vec<AgentTaskLine<'a>>, bool) {
+        let (lines, collapsed) = self.lines_for_inner(pane_id);
+        (lines, collapsed && self.toggle_fits)
+    }
+
+    fn lines_for_inner(&self, pane_id: &str) -> (Vec<AgentTaskLine<'a>>, bool) {
+        let Some(tasks) = self.tasks.get(pane_id) else {
+            return (Vec::new(), false);
+        };
+        // A status this client does not know has no icon it could draw truthfully.
+        let lines = tasks
+            .iter()
+            .filter_map(|task| {
+                Some(AgentTaskLine {
+                    status: task_agent_status(task.status)?,
+                    label: task.label.as_str(),
+                })
+            })
+            .collect::<Vec<_>>();
+        let collapsed = !lines.is_empty()
+            && self
+                .collapsed
+                .is_some_and(|collapsed| collapsed.contains(pane_id));
+        (lines, collapsed)
+    }
+}
+
+/// Task statuses reuse the agent status icons and colours: failed reads as blocked.
+fn task_agent_status(status: EndpointAgentTaskStatus) -> Option<AgentStatus> {
+    match status {
+        EndpointAgentTaskStatus::Working => Some(AgentStatus::Working),
+        EndpointAgentTaskStatus::Done => Some(AgentStatus::Done),
+        EndpointAgentTaskStatus::Failed => Some(AgentStatus::Blocked),
+        EndpointAgentTaskStatus::Unknown => None,
+    }
+}
+
+/// Collapsed parents show the most urgent child: failed, then working, then done.
+fn rolled_up_task_status(tasks: &[AgentTaskLine<'_>]) -> Option<AgentStatus> {
+    let rank = |status: AgentStatus| match status {
+        AgentStatus::Blocked => 3,
+        AgentStatus::Working => 2,
+        _ => 1,
+    };
+    tasks
+        .iter()
+        .map(|task| task.status)
+        .max_by_key(|status| rank(*status))
+}
+
+fn task_icon(status: AgentStatus) -> &'static str {
+    status_icon(status, crate::config::StatusIndicatorStyle::Symbols)
 }
 
 pub(super) fn ordered_agent_pane_ids(
@@ -54,6 +157,8 @@ pub(super) fn render_agent_panel(
     area: Rect,
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
+    endpoint_id: &ClientEndpointId,
+    tasks: Option<AgentTaskSource<'_>>,
     agent_scroll: &mut usize,
     hits: &mut ShellHitMap,
 ) {
@@ -67,7 +172,7 @@ pub(super) fn render_agent_panel(
         return;
     }
 
-    let rows = agent_rows(snapshot, config, None);
+    let rows = agent_rows(snapshot, config, None, tasks);
     render_agent_list(
         buffer,
         area,
@@ -79,10 +184,13 @@ pub(super) fn render_agent_panel(
         config,
         agent_scroll,
         hits,
-        |row| row.rows.len(),
+        AgentRow::line_count,
         |buffer, rect, row, hits| {
             hits.agents.push((rect, row.pane_id.clone()));
-            render_agent_row(buffer, rect, row, config);
+            if let Some(toggle) = render_agent_row(buffer, rect, row, config) {
+                hits.agent_task_toggles
+                    .push((toggle, endpoint_id.clone(), row.pane_id.clone()));
+            }
         },
     );
 }
@@ -234,23 +342,25 @@ pub(super) fn render_agent_list<T>(
     }
 }
 
-pub(super) fn agent_rows(
+pub(super) fn agent_rows<'a>(
     snapshot: &ClientShellSnapshot,
     config: &ClientShellConfig,
     machine: Option<&str>,
-) -> Vec<AgentRow> {
+    tasks: Option<AgentTaskSource<'a>>,
+) -> Vec<AgentRow<'a>> {
     ordered_agent_pane_ids(snapshot, config.agent_panel_sort)
         .into_iter()
-        .filter_map(|pane_id| agent_row(snapshot, &pane_id, config, machine))
+        .filter_map(|pane_id| agent_row(snapshot, &pane_id, config, machine, tasks))
         .collect()
 }
 
-pub(super) fn agent_row(
+pub(super) fn agent_row<'a>(
     snapshot: &ClientShellSnapshot,
     pane_id: &str,
     config: &ClientShellConfig,
     machine: Option<&str>,
-) -> Option<AgentRow> {
+    tasks: Option<AgentTaskSource<'a>>,
+) -> Option<AgentRow<'a>> {
     let agent = snapshot
         .agents
         .iter()
@@ -310,20 +420,29 @@ pub(super) fn agent_row(
         },
         state_text,
     );
+    let tasks_source_fits = tasks.is_some_and(|source| source.toggle_fits);
+    let (tasks, tasks_collapsed) = tasks.map_or((Vec::new(), false), |source| {
+        source.lines_for(&agent.pane_id)
+    });
     Some(AgentRow {
         pane_id: agent.pane_id.clone(),
         status: agent.agent_status,
         focused: agent.focused,
         rows,
+        tasks,
+        tasks_collapsed,
+        toggle_fits: tasks_source_fits,
     })
 }
 
+/// Draws the row and its task children. Returns the collapse toggle's hit rect when the row
+/// has tasks.
 pub(super) fn render_agent_row(
     buffer: &mut Buffer,
     rect: Rect,
     row: &AgentRow,
     config: &ClientShellConfig,
-) {
+) -> Option<Rect> {
     let palette = &config.palette;
     let row_style = if row.focused {
         Style::default().bg(palette.active_row_bg)
@@ -353,8 +472,16 @@ pub(super) fn render_agent_row(
     } else {
         row.rows.clone()
     };
+    // Room for the collapse toggle (and the rolled-up child status when collapsed).
+    let toggle_reserve = match (row.tasks.is_empty(), row.tasks_collapsed) {
+        (true, _) => 0,
+        (false, false) => 2,
+        (false, true) => 4,
+    };
+    let toggle_reserve = if row.toggle_fits { toggle_reserve } else { 0 };
     for (index, tokens) in rows.iter().take(rect.height as usize).enumerate() {
         let indent = if index == 0 { 1 } else { 3 };
+        let reserve = if index == 0 { toggle_reserve } else { 0 };
         let mut spans = vec![ratatui::text::Span::raw(" ".repeat(indent))];
         spans.extend(crate::ui::resolved_token_spans(
             tokens,
@@ -364,13 +491,86 @@ pub(super) fn render_agent_row(
             secondary,
             secondary,
             palette,
-            rect.width.saturating_sub(indent as u16) as usize,
+            rect.width.saturating_sub(indent as u16 + reserve) as usize,
         ));
         Paragraph::new(Line::from(spans)).style(row_style).render(
             Rect::new(rect.x, rect.y + index as u16, rect.width, 1),
             buffer,
         );
     }
+    if row.tasks.is_empty() {
+        return None;
+    }
+
+    let mut toggle = None;
+    if toggle_reserve > 0 && rect.height > 0 {
+        let toggle_rect = Rect::new(rect.right() - 1, rect.y, 1, 1);
+        put_text(
+            buffer,
+            toggle_rect.x,
+            toggle_rect.y,
+            1,
+            super::sidebar::group_toggle_glyph(row.tasks_collapsed),
+            Style::default().fg(palette.accent),
+        );
+        if row.tasks_collapsed {
+            if let Some(status) = rolled_up_task_status(&row.tasks) {
+                put_text(
+                    buffer,
+                    rect.right() - 3,
+                    rect.y,
+                    1,
+                    task_icon(status),
+                    Style::default().fg(status_color(status, palette)),
+                );
+            }
+        }
+        toggle = Some(toggle_rect);
+    }
+    if row.tasks_collapsed {
+        return toggle;
+    }
+
+    let first_child_y = rect.y + rows.len() as u16;
+    for (index, task) in row.tasks.iter().enumerate() {
+        let y = first_child_y.saturating_add(index as u16);
+        if y >= rect.bottom() {
+            break;
+        }
+        let connector = if index + 1 == row.tasks.len() {
+            "└─ "
+        } else {
+            "├─ "
+        };
+        if row.focused {
+            buffer.set_style(Rect::new(rect.x, y, rect.width, 1), row_style);
+        }
+        let mut x = rect.x.saturating_add(1);
+        x = super::render::put_segment(buffer, x, y, rect.right(), connector, secondary);
+        x = super::render::put_segment(
+            buffer,
+            x,
+            y,
+            rect.right(),
+            task_icon(task.status),
+            Style::default().fg(status_color(task.status, palette)),
+        );
+        x = super::render::put_segment(buffer, x, y, rect.right(), " ", secondary);
+        let label_style = Style::default().fg(if row.focused {
+            palette.text
+        } else {
+            palette.subtext0
+        });
+        super::render::put_text(
+            buffer,
+            x,
+            y,
+            rect.right().saturating_sub(x),
+            task.label,
+            label_style,
+        );
+    }
+    toggle
 }
 
 fn put_text(buffer: &mut Buffer, x: u16, y: u16, width: u16, text: &str, style: Style) {

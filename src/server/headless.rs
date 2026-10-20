@@ -435,6 +435,7 @@ impl HeadlessServer {
             crate::render_prof::event("loop.tick");
             crate::render_prof::flush_if_due();
             self.app.reap_finished_detached_processes();
+            self.app.acknowledge_focused_agent_tasks();
 
             // If shutdown has been initiated, complete it and exit.
             if self.shutting_down {
@@ -1910,6 +1911,7 @@ impl HeadlessServer {
                 surface_reuse,
                 surface_delta,
                 surface_scroll,
+                agent_tasks,
                 writer,
             } => {
                 if self.handoff_in_progress {
@@ -2007,6 +2009,25 @@ impl HeadlessServer {
                         return false;
                     }
                 };
+                let mut tasks_message = None;
+                if agent_tasks {
+                    connection.shell_agent_tasks_enabled = true;
+                    connection.shell_agent_tasks_revision = self.app.state.agent_tasks_revision;
+                    let tasks = crate::protocol::endpoint::EndpointAgentTasks {
+                        boot_id: seed_snapshot.boot_id.clone(),
+                        revision: seed_snapshot.revision,
+                        tasks: crate::server::client_shell::agent_tasks_projection(&self.app),
+                    };
+                    // Always seed, even when empty, so a reconnecting client drops stale tasks.
+                    match crate::protocol::endpoint::agent_tasks_message(&tasks) {
+                        Ok(message) => tasks_message = Some(message),
+                        Err(err) => {
+                            warn!(client_id, err = %err, "failed to encode agent tasks");
+                            return false;
+                        }
+                    }
+                    connection.shell_agent_tasks = Some(tasks);
+                }
                 connection.shell_location = Some(location);
                 connection.shell_snapshot = Some(seed_snapshot);
                 connection.shell_agent_completions = Some(completion_projection);
@@ -2019,6 +2040,9 @@ impl HeadlessServer {
                     self.send_to_client(client_id, message);
                 }
                 self.send_to_client(client_id, completion_message);
+                if let Some(message) = tasks_message {
+                    self.send_to_client(client_id, message);
+                }
                 self.send_to_client(client_id, snapshot_message);
                 if surface_active {
                     self.foreground_client_id = Some(client_id);
@@ -2663,7 +2687,10 @@ impl HeadlessServer {
     }
 
     fn handle_server_event_with_render_impact(&mut self, ev: ServerEvent) -> RenderImpact {
-        if self.handle_server_event(ev) {
+        let changed = self.handle_server_event(ev);
+        // Mouse and keyboard focus changes land here, before the next loop tick.
+        let tasks_changed = self.app.acknowledge_focused_agent_tasks();
+        if changed || tasks_changed {
             RenderImpact::Full
         } else {
             RenderImpact::None
@@ -3090,6 +3117,7 @@ impl HeadlessServer {
             self.app
                 .handle_api_request_after_internal_events_drained(msg.request)
         };
+        self.app.acknowledge_focused_agent_tasks();
         if let Some(snapshot) = frozen_alt_screen_read {
             if let Ok(mut success) = serde_json::from_str::<api::schema::SuccessResponse>(&response)
             {

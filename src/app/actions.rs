@@ -198,6 +198,51 @@ impl AppState {
         })
     }
 
+    /// When a pane becomes the focused one, drop its finished agent tasks.
+    /// Cheap no-op while focus is unchanged, so it can run on every tick.
+    pub(crate) fn acknowledge_focused_agent_tasks(&mut self) -> bool {
+        // Runs every tick: compare by reference and clone the workspace id only on change.
+        let current = self
+            .active
+            .and_then(|ws_idx| self.workspaces.get(ws_idx))
+            .and_then(|ws| Some((ws, ws.focused_pane_id()?)));
+        let unchanged = match (&current, &self.agent_task_focus) {
+            (Some((ws, pane_id)), Some(last)) => {
+                ws.id == last.workspace_id && *pane_id == last.pane_id
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        if unchanged {
+            return false;
+        }
+        let target = current.map(|(ws, pane_id)| PaneFocusTarget {
+            workspace_id: ws.id.clone(),
+            pane_id,
+        });
+        self.agent_task_focus = target.clone();
+        let Some(target) = target else {
+            return false;
+        };
+        let Some(terminal_id) = self
+            .workspaces
+            .iter()
+            .find(|ws| ws.id == target.workspace_id)
+            .and_then(|ws| ws.pane_state(target.pane_id))
+            .map(|pane| pane.attached_terminal_id.clone())
+        else {
+            return false;
+        };
+        let changed = self
+            .terminals
+            .get_mut(&terminal_id)
+            .is_some_and(|terminal| terminal.agent_tasks.acknowledge_finished());
+        if changed {
+            self.agent_tasks_revision = self.agent_tasks_revision.wrapping_add(1);
+        }
+        changed
+    }
+
     pub(crate) fn record_pane_focus_change(
         &mut self,
         previous: Option<PaneFocusTarget>,
@@ -1717,6 +1762,12 @@ impl AppState {
                 self.session_dirty = true;
             }
             let mutation = mutation?;
+            // Background tasks belong to one agent session.
+            if (mutation.session_ref_changed || mutation.agent_released)
+                && terminal.agent_tasks.clear()
+            {
+                self.agent_tasks_revision = self.agent_tasks_revision.wrapping_add(1);
+            }
             let completion_reset = mutation.session_ref_changed
                 || mutation
                     .effective_state_change
@@ -4566,6 +4617,104 @@ mod tests {
             state.toast.as_ref().map(|toast| toast.kind),
             Some(ToastKind::Finished)
         ));
+    }
+
+    fn task_report(
+        id: &str,
+        seq: u64,
+        status: crate::api::schema::AgentTaskStatus,
+    ) -> crate::terminal::agent_tasks::AgentTaskReport {
+        crate::terminal::agent_tasks::AgentTaskReport {
+            source: "test".into(),
+            task_id: id.into(),
+            seq,
+            status,
+            description: None,
+            agent_type: None,
+            branch: None,
+            cwd: None,
+        }
+    }
+
+    // AC-2.3
+    #[test]
+    fn ac_2_3_session_change_and_agent_exit_clear_agent_tasks() {
+        use crate::api::schema::AgentTaskStatus::Working;
+        let mut state = app_with_workspaces(&["test"]);
+        state.ensure_test_terminals();
+        let pane_id = state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = state.terminal_id_for_pane(0, pane_id).unwrap();
+        let report_session = |state: &mut AppState, seq: u64, session: &str, reason: &str| {
+            state.handle_app_event(AppEvent::AgentSessionReported {
+                pane_id,
+                source: "herdr:claude".into(),
+                agent_label: "claude".into(),
+                seq: Some(seq),
+                session_ref: crate::agent_resume::AgentSessionRef::id(session),
+                session_start_source: Some(reason.into()),
+            });
+        };
+        let task_count = |state: &AppState| state.terminals[&terminal_id].agent_tasks.tasks().len();
+
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Claude), AgentState::Working);
+        report_session(&mut state, 1, "s1", "startup");
+        assert!(state.terminals[&terminal_id]
+            .persisted_agent_session
+            .is_some());
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .agent_tasks
+            .report(task_report("t1", 1, Working));
+        report_session(&mut state, 2, "s1", "resume");
+        assert_eq!(task_count(&state), 1, "same session keeps tasks");
+        report_session(&mut state, 3, "s2", "clear");
+        assert_eq!(task_count(&state), 0, "new session clears tasks");
+
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .agent_tasks
+            .report(task_report("t2", 1, Working));
+        assert_eq!(task_count(&state), 1);
+        let update = state
+            .publish_pane_process_exit_if_agent(pane_id, false)
+            .expect("process exit update");
+        assert!(update.agent_released);
+        assert_eq!(task_count(&state), 0, "agent exit clears tasks");
+    }
+
+    // AC-2.4
+    #[test]
+    fn ac_2_4_focusing_a_pane_drops_finished_tasks_and_keeps_working() {
+        use crate::api::schema::AgentTaskStatus::{Done, Failed, Working};
+        let mut state = app_with_workspaces(&["a", "b"]);
+        state.ensure_test_terminals();
+        state.active = Some(0);
+        assert!(!state.acknowledge_focused_agent_tasks());
+        let pane_id = state.workspaces[1].tabs[0].root_pane;
+        let terminal_id = state.terminal_id_for_pane(1, pane_id).unwrap();
+        let tasks = &mut state.terminals.get_mut(&terminal_id).unwrap().agent_tasks;
+        for id in ["w", "d", "f"] {
+            tasks.report(task_report(id, 1, Working));
+        }
+        tasks.report(task_report("d", 2, Done));
+        tasks.report(task_report("f", 2, Failed));
+
+        assert!(!state.acknowledge_focused_agent_tasks(), "focus unchanged");
+        assert_eq!(state.terminals[&terminal_id].agent_tasks.tasks().len(), 3);
+
+        state.active = Some(1);
+        assert!(state.acknowledge_focused_agent_tasks());
+        let kept = state.terminals[&terminal_id].agent_tasks.tasks();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].task_id, "w");
     }
 
     #[test]

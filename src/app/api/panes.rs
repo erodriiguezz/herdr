@@ -1,20 +1,20 @@
 use bytes::Bytes;
 
 use crate::api::schema::{
-    EventData, EventEnvelope, EventKind, PaneClearAgentAuthorityParams, PaneCopyMotion,
-    PaneCopyMotionParams, PaneCopySearchDirection, PaneCopySearchParams, PaneCurrentParams,
-    PaneDirection, PaneEdgesParams, PaneEdgesResult, PaneFocusDirectionParams,
-    PaneFocusDirectionReason, PaneFocusDirectionResult, PaneInfo, PaneInputSetParams,
-    PaneLayoutPane, PaneLayoutParams, PaneLayoutRect, PaneLayoutSnapshot, PaneLayoutSplit,
-    PaneListParams, PaneMoveDestination, PaneMoveParams, PaneMoveReason, PaneMoveResult,
-    PaneNeighborParams, PaneNeighborResult, PaneProcessInfo, PaneProcessInfoParams,
+    AgentTaskInfo, EventData, EventEnvelope, EventKind, PaneAgentTasks,
+    PaneClearAgentAuthorityParams, PaneCopyMotion, PaneCopyMotionParams, PaneCopySearchDirection,
+    PaneCopySearchParams, PaneCurrentParams, PaneDirection, PaneEdgesParams, PaneEdgesResult,
+    PaneFocusDirectionParams, PaneFocusDirectionReason, PaneFocusDirectionResult, PaneInfo,
+    PaneInputSetParams, PaneLayoutPane, PaneLayoutParams, PaneLayoutRect, PaneLayoutSnapshot,
+    PaneLayoutSplit, PaneListParams, PaneMoveDestination, PaneMoveParams, PaneMoveReason,
+    PaneMoveResult, PaneNeighborParams, PaneNeighborResult, PaneProcessInfo, PaneProcessInfoParams,
     PaneProcessInfoProcess, PaneReadParams, PaneReadResult, PaneReleaseAgentParams,
     PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
-    PaneReportMetadataParams, PaneResizeParams, PaneResizeReason, PaneResizeResult,
-    PaneScrollParams, PaneSelectionReadParams, PaneSendInputParams, PaneSendKeysParams,
-    PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneSwapReason, PaneSwapResult,
-    PaneTarget, PaneTextPoint, PaneTextRange, PaneZoomMode, PaneZoomParams, PaneZoomReason,
-    PaneZoomResult, ResponseResult,
+    PaneReportAgentTaskParams, PaneReportMetadataParams, PaneResizeParams, PaneResizeReason,
+    PaneResizeResult, PaneScrollParams, PaneSelectionReadParams, PaneSendInputParams,
+    PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneSwapReason,
+    PaneSwapResult, PaneTarget, PaneTextPoint, PaneTextRange, PaneZoomMode, PaneZoomParams,
+    PaneZoomReason, PaneZoomResult, ResponseResult,
 };
 use crate::app::actions::{PaneZoomCommand, PaneZoomNoopReason};
 use crate::app::App;
@@ -1698,6 +1698,84 @@ impl App {
         encode_success(id, ResponseResult::Ok {})
     }
 
+    pub(super) fn handle_pane_report_agent_task(
+        &mut self,
+        id: String,
+        params: PaneReportAgentTaskParams,
+    ) -> String {
+        let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        let Some(task_id) = crate::terminal::agent_tasks::clean_task_id(&params.task_id) else {
+            return encode_error(
+                id,
+                "invalid_task_id",
+                "task_id must be 1 to 128 characters without control characters",
+            );
+        };
+        let Some(terminal_id) = self.pane_terminal(ws_idx, pane_id).map(|t| t.id.clone()) else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        let changed = self
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .is_some_and(|terminal| {
+                terminal
+                    .agent_tasks
+                    .report(crate::terminal::agent_tasks::AgentTaskReport {
+                        source: params.source,
+                        task_id,
+                        seq: params.seq,
+                        status: params.status,
+                        description: params.description,
+                        agent_type: params.agent_type,
+                        branch: params.branch,
+                        cwd: params.cwd,
+                    })
+            });
+        if changed {
+            self.state.agent_tasks_revision = self.state.agent_tasks_revision.wrapping_add(1);
+            self.render_dirty.request_generic();
+            self.render_notify.notify_one();
+        }
+        encode_success(id, ResponseResult::Ok {})
+    }
+
+    pub(super) fn handle_pane_agent_tasks(&mut self, id: String, target: PaneTarget) -> String {
+        let Some((ws_idx, pane_id)) = self.parse_pane_id(&target.pane_id) else {
+            return pane_not_found(id, &target.pane_id);
+        };
+        let (Some(public_pane_id), Some(terminal)) = (
+            self.public_pane_id(ws_idx, pane_id),
+            self.pane_terminal(ws_idx, pane_id),
+        ) else {
+            return pane_not_found(id, &target.pane_id);
+        };
+        let tasks = terminal
+            .agent_tasks
+            .tasks()
+            .iter()
+            .map(|task| AgentTaskInfo {
+                task_id: task.task_id.clone(),
+                label: task.label().to_owned(),
+                agent_type: task.agent_type.clone(),
+                branch: task.branch.clone(),
+                cwd: task.cwd.clone(),
+                status: task.status,
+            })
+            .collect();
+        encode_success(
+            id,
+            ResponseResult::PaneAgentTasks {
+                agent_tasks: PaneAgentTasks {
+                    pane_id: public_pane_id,
+                    tasks,
+                },
+            },
+        )
+    }
+
     pub(super) fn handle_pane_report_metadata(
         &mut self,
         id: String,
@@ -2344,6 +2422,108 @@ mod tests {
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
         let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
         (app, public_pane_id)
+    }
+
+    fn report_task_request(
+        pane_id: &str,
+        seq: u64,
+        status: crate::api::schema::AgentTaskStatus,
+    ) -> crate::api::schema::Request {
+        crate::api::schema::Request {
+            id: "req".into(),
+            method: crate::api::schema::Method::PaneReportAgentTask(PaneReportAgentTaskParams {
+                pane_id: pane_id.into(),
+                source: "herdr:claude".into(),
+                seq,
+                task_id: "t1".into(),
+                status,
+                description: None,
+                agent_type: Some("general".into()),
+                branch: Some("feat/x".into()),
+                cwd: None,
+            }),
+        }
+    }
+
+    fn list_tasks(app: &mut App, pane_id: &str) -> PaneAgentTasks {
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req".into(),
+            method: crate::api::schema::Method::PaneAgentTasks(PaneTarget {
+                pane_id: pane_id.into(),
+            }),
+        });
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneAgentTasks { agent_tasks } = success.result else {
+            panic!("expected agent tasks response");
+        };
+        agent_tasks
+    }
+
+    // AC-2.1
+    #[test]
+    fn ac_2_1_report_agent_task_is_readable_ordered_and_pane_checked() {
+        use crate::api::schema::AgentTaskStatus::{Done, Working};
+        let (mut app, pane_id) = app_with_test_workspace();
+
+        let response = app.handle_api_request(report_task_request(&pane_id, 2, Working));
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.result, ResponseResult::Ok {});
+        let tasks = list_tasks(&mut app, &pane_id);
+        assert_eq!(tasks.pane_id, pane_id);
+        assert_eq!(tasks.tasks.len(), 1);
+        assert_eq!(tasks.tasks[0].label, "feat/x");
+        assert_eq!(tasks.tasks[0].agent_type.as_deref(), Some("general"));
+        assert_eq!(tasks.tasks[0].status, Working);
+
+        app.handle_api_request(report_task_request(&pane_id, 1, Working));
+        assert_eq!(list_tasks(&mut app, &pane_id).tasks[0].status, Working);
+        // A finish applies whatever its seq: hook processes race.
+        app.handle_api_request(report_task_request(&pane_id, 1, Done));
+        assert_eq!(list_tasks(&mut app, &pane_id).tasks[0].status, Done);
+        app.handle_api_request(report_task_request(&pane_id, 5, Working));
+        assert_eq!(list_tasks(&mut app, &pane_id).tasks[0].status, Done);
+
+        let response = app.handle_api_request(report_task_request("pane_missing", 1, Working));
+        let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "pane_not_found");
+        let mut bad = report_task_request(&pane_id, 1, Working);
+        if let crate::api::schema::Method::PaneReportAgentTask(params) = &mut bad.method {
+            params.task_id = "  ".into();
+        }
+        let error: ErrorResponse = serde_json::from_str(&app.handle_api_request(bad)).unwrap();
+        assert_eq!(error.error.code, "invalid_task_id");
+    }
+
+    // AC-2.4
+    #[test]
+    fn ac_2_4_api_focus_acknowledges_finished_tasks() {
+        use crate::api::schema::AgentTaskStatus::{Done, Working};
+        let (mut app, pane_id) = app_with_test_workspace();
+        let other = app
+            .state
+            .workspaces
+            .first_mut()
+            .unwrap()
+            .test_split(ratatui::layout::Direction::Horizontal);
+        app.state.ensure_test_terminals();
+        let other_id = app.public_pane_id(0, other).unwrap();
+        app.handle_api_request(crate::api::schema::Request {
+            id: "req".into(),
+            method: crate::api::schema::Method::PaneFocus(PaneTarget {
+                pane_id: pane_id.clone(),
+            }),
+        });
+        app.handle_api_request(report_task_request(&other_id, 1, Working));
+        app.handle_api_request(report_task_request(&other_id, 2, Done));
+        assert_eq!(list_tasks(&mut app, &other_id).tasks.len(), 1);
+
+        app.handle_api_request(crate::api::schema::Request {
+            id: "req".into(),
+            method: crate::api::schema::Method::PaneFocus(PaneTarget {
+                pane_id: other_id.clone(),
+            }),
+        });
+        assert!(list_tasks(&mut app, &other_id).tasks.is_empty());
     }
 
     #[test]

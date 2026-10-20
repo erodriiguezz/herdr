@@ -10,6 +10,7 @@ pub(crate) enum EndpointControlMessage {
     HealthPong,
     AgentViewProjection(DecodedAgentViewProjection),
     AgentCompletions(crate::protocol::endpoint::EndpointAgentCompletions),
+    AgentTasks(crate::protocol::endpoint::EndpointAgentTasks),
     Snapshot(Box<crate::protocol::ClientShellSnapshot>),
     Ignored,
 }
@@ -24,6 +25,11 @@ pub(crate) fn decode_endpoint_control(
     if kind == crate::protocol::endpoint::AGENT_COMPLETIONS_KIND {
         return Ok(serde_json::from_str(data)
             .map(EndpointControlMessage::AgentCompletions)
+            .unwrap_or(EndpointControlMessage::Ignored));
+    }
+    if kind == crate::protocol::endpoint::AGENT_TASKS_KIND {
+        return Ok(serde_json::from_str(data)
+            .map(EndpointControlMessage::AgentTasks)
             .unwrap_or(EndpointControlMessage::Ignored));
     }
     if kind == crate::protocol::endpoint::AGENT_VIEW_PROJECTION_KIND {
@@ -79,6 +85,30 @@ mod tests {
     fn unknown_optional_controls_are_ignored() {
         assert!(matches!(
             decode_endpoint_control("future.optional", "not json").unwrap(),
+            EndpointControlMessage::Ignored
+        ));
+    }
+
+    #[test]
+    fn agent_tasks_optional_control_decodes_and_ignores_garbage() {
+        let projection = crate::protocol::endpoint::EndpointAgentTasks {
+            boot_id: "boot".into(),
+            revision: 3,
+            tasks: Default::default(),
+        };
+        let crate::protocol::ServerMessage::EndpointControl { kind, data } =
+            crate::protocol::endpoint::agent_tasks_message(&projection).unwrap()
+        else {
+            panic!("expected optional control");
+        };
+        let EndpointControlMessage::AgentTasks(decoded) =
+            decode_endpoint_control(&kind, &data).unwrap()
+        else {
+            panic!("expected agent tasks");
+        };
+        assert_eq!(decoded, projection);
+        assert!(matches!(
+            decode_endpoint_control(&kind, "invalid").unwrap(),
             EndpointControlMessage::Ignored
         ));
     }

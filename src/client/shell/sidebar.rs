@@ -430,11 +430,24 @@ pub(crate) fn render_sidebar(
         }
     }
 
+    let endpoint = state
+        .endpoints
+        .iter()
+        .find(|endpoint| &endpoint.endpoint_id == state.active_endpoint_id);
+    let tasks = endpoint.map(|endpoint| {
+        super::agent_sidebar::AgentTaskSource::for_endpoint(
+            endpoint,
+            state.collapsed_agent_tasks,
+            detail_area.width,
+        )
+    });
     super::render_agent_panel(
         buffer,
         detail_area,
         snapshot,
         config,
+        state.active_endpoint_id,
+        tasks,
         state.agent_scroll,
         hits,
     );
@@ -620,14 +633,19 @@ pub(in crate::client::shell) fn render_parent_group_toggle(
         toggle.x,
         toggle.y,
         toggle.width,
-        if collapsed_groups.contains(&key) {
-            "▸"
-        } else {
-            "▾"
-        },
+        group_toggle_glyph(collapsed_groups.contains(&key)),
         Style::default().fg(palette.accent),
     );
     Some((toggle, key))
+}
+
+/// Expand/collapse marker shared by worktree groups and agent task lists.
+pub(in crate::client::shell) fn group_toggle_glyph(collapsed: bool) -> &'static str {
+    if collapsed {
+        "▸"
+    } else {
+        "▾"
+    }
 }
 
 pub(in crate::client::shell) fn displayed_workspace_status(
