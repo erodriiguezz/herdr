@@ -146,11 +146,12 @@ impl AgentTasks {
             .iter()
             .position(|f| f.source == source && f.task_id == report.task_id)
         {
+            // Task ids are unique per launch, so a remembered finish always
+            // belongs after this start, even when a delayed start process
+            // stamped a later seq.
             if let Some(finish) = self.early_finishes.remove(index) {
-                if finish.seq > report.seq {
-                    status = finish.status;
-                    seq = finish.seq;
-                }
+                status = finish.status;
+                seq = seq.max(finish.seq);
             }
         }
         if self.tasks.len() >= MAX_TASKS {
@@ -362,7 +363,7 @@ mod tests {
 
     // AC-2.1
     #[test]
-    fn ac_2_1_early_finish_is_source_scoped_and_ignored_when_older_than_start() {
+    fn ac_2_1_early_finish_is_source_scoped_and_applies_to_a_later_stamped_start() {
         let mut tasks = AgentTasks::default();
         let mut foreign = report("t1", 10, AgentTaskStatus::Failed);
         foreign.source = "other".into();
@@ -370,9 +371,12 @@ mod tests {
         tasks.report(report("t2", 3, AgentTaskStatus::Done));
 
         assert!(tasks.report(report("t1", 5, AgentTaskStatus::Working)));
+        // A delayed start process stamps a later seq than the finish it follows.
         assert!(tasks.report(report("t2", 4, AgentTaskStatus::Working)));
         assert_eq!(tasks.tasks()[0].status, AgentTaskStatus::Working);
-        assert_eq!(tasks.tasks()[1].status, AgentTaskStatus::Working);
+        assert_eq!(tasks.tasks()[1].status, AgentTaskStatus::Done);
+        assert!(!tasks.report(report("t2", 4, AgentTaskStatus::Working)));
+        assert_eq!(tasks.tasks()[1].status, AgentTaskStatus::Done);
     }
 
     // AC-2.1

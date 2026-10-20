@@ -729,7 +729,7 @@ Agents that run background tasks inside their pane (for example Claude's Agent-t
 
 - A report whose `seq` is not greater than the last one stored for that `task_id` is ignored.
 - A task belongs to the `source` that first reported it. Reports for the same `task_id` from a different `source` are ignored.
-- `done` or `failed` for a task that was never reported as `working` does not create a task. Herdr remembers the last 20 such finishes, so when a `working` report with a lower `seq` arrives afterwards (separate hook processes can deliver a fast task's finish first), the task is created with the finished status.
+- `done` or `failed` for a task that was never reported as `working` does not create a task. Herdr remembers the last 20 such finishes, so when a `working` report from the same `source` arrives afterwards (separate hook processes can deliver a fast task's finish first), the task is created with the finished status. `task_id` must therefore be unique per task launch.
 - A pane holds at most 20 tasks. A new task beyond that evicts the oldest finished task, or the oldest task when none has finished.
 - Tasks, and the remembered early finishes, clear when the pane's agent session changes or its agent exits.
 - When the pane becomes the focused pane, its `done` and `failed` tasks are dropped and `working` tasks stay.
