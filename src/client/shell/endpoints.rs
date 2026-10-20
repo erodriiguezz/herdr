@@ -339,6 +339,23 @@ impl ClientShellState {
         }
     }
 
+    pub(crate) fn set_endpoint_agent_tasks(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        generation: u64,
+        projection: crate::protocol::endpoint::EndpointAgentTasks,
+    ) {
+        if let Some(endpoint) = self
+            .endpoints
+            .iter_mut()
+            .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
+        {
+            endpoint
+                .agent_presentation
+                .receive_tasks(Some(generation), projection);
+        }
+    }
+
     pub(crate) fn set_endpoint_agent_view_projection_for_generation(
         &mut self,
         endpoint_id: &ClientEndpointId,

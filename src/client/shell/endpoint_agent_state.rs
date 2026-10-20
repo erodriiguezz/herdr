@@ -1,6 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::api::schema::AgentStatus;
+use crate::protocol::endpoint::{EndpointAgentTask, EndpointAgentTasks};
 use crate::protocol::{ClientShellAgent, ClientShellSnapshot, PaneSurfaceFrame};
 
 #[derive(Clone, Debug, Default)]
@@ -13,6 +14,10 @@ pub(super) struct EndpointAgentPresentation {
         Option<u64>,
         crate::protocol::endpoint::EndpointAgentCompletions,
     )>,
+    /// Background tasks per pane from the last applied companion. Kept across snapshots:
+    /// the server only resends the map when it changes.
+    tasks: BTreeMap<String, Vec<EndpointAgentTask>>,
+    pending_tasks: Option<(Option<u64>, EndpointAgentTasks)>,
 }
 
 impl EndpointAgentPresentation {
@@ -35,6 +40,19 @@ impl EndpointAgentPresentation {
         self.pending_completions = Some((generation, completions));
     }
 
+    pub(super) fn receive_tasks(&mut self, generation: Option<u64>, tasks: EndpointAgentTasks) {
+        self.pending_tasks = Some((generation, tasks));
+    }
+
+    pub(super) fn agent_tasks(&self) -> &BTreeMap<String, Vec<EndpointAgentTask>> {
+        &self.tasks
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_test_tasks(&mut self, tasks: BTreeMap<String, Vec<EndpointAgentTask>>) {
+        self.tasks = tasks;
+    }
+
     #[cfg(test)]
     pub(super) fn project_snapshot(&mut self, snapshot: &mut ClientShellSnapshot) {
         self.project_snapshot_for_generation(snapshot, None);
@@ -50,6 +68,7 @@ impl EndpointAgentPresentation {
             self.acknowledged.clear();
             self.completed.clear();
             self.working.clear();
+            self.tasks.clear();
             self.acknowledged.extend(
                 snapshot
                     .agents
@@ -68,6 +87,17 @@ impl EndpointAgentPresentation {
             .retain(|pane_id, _| pane_ids.contains(pane_id.as_str()));
         self.working
             .retain(|pane_id| pane_ids.contains(pane_id.as_str()));
+        if let Some((_, tasks)) =
+            self.pending_tasks
+                .take()
+                .filter(|(received_generation, projection)| {
+                    *received_generation == generation
+                        && projection.boot_id == snapshot.boot_id
+                        && projection.revision == snapshot.revision
+                })
+        {
+            self.tasks = tasks.tasks;
+        }
         let completions = self
             .pending_completions
             .take()
@@ -271,6 +301,36 @@ mod tests {
             popup: None,
             graphics: Default::default(),
         }
+    }
+
+    #[test]
+    fn agent_tasks_apply_with_the_matching_snapshot_and_persist_until_replaced() {
+        let tasks = |revision: u64, label: &str| EndpointAgentTasks {
+            boot_id: "endpoint-boot".into(),
+            revision,
+            tasks: [(
+                "pane".to_owned(),
+                vec![EndpointAgentTask {
+                    task_id: "t".into(),
+                    label: label.into(),
+                    agent_type: None,
+                    status: crate::protocol::endpoint::EndpointAgentTaskStatus::Working,
+                }],
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let mut presentation = EndpointAgentPresentation::default();
+        presentation.receive_tasks(None, tasks(2, "first"));
+        presentation.project_snapshot(&mut snapshot(AgentStatus::Working, 1, 1));
+        assert!(presentation.agent_tasks().is_empty(), "revision mismatch");
+
+        presentation.receive_tasks(None, tasks(2, "first"));
+        presentation.project_snapshot(&mut snapshot(AgentStatus::Working, 1, 2));
+        assert_eq!(presentation.agent_tasks()["pane"][0].label, "first");
+
+        presentation.project_snapshot(&mut snapshot(AgentStatus::Working, 1, 3));
+        assert_eq!(presentation.agent_tasks()["pane"][0].label, "first");
     }
 
     #[test]

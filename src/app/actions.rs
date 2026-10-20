@@ -218,9 +218,14 @@ impl AppState {
         else {
             return false;
         };
-        self.terminals
+        let changed = self
+            .terminals
             .get_mut(&terminal_id)
-            .is_some_and(|terminal| terminal.agent_tasks.acknowledge_finished())
+            .is_some_and(|terminal| terminal.agent_tasks.acknowledge_finished());
+        if changed {
+            self.agent_tasks_revision = self.agent_tasks_revision.wrapping_add(1);
+        }
+        changed
     }
 
     pub(crate) fn record_pane_focus_change(
@@ -1743,8 +1748,10 @@ impl AppState {
             }
             let mutation = mutation?;
             // Background tasks belong to one agent session.
-            if mutation.session_ref_changed || mutation.agent_released {
-                terminal.agent_tasks.clear();
+            if (mutation.session_ref_changed || mutation.agent_released)
+                && terminal.agent_tasks.clear()
+            {
+                self.agent_tasks_revision = self.agent_tasks_revision.wrapping_add(1);
             }
             let completion_reset = mutation.session_ref_changed
                 || mutation

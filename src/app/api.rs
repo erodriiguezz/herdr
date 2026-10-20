@@ -929,6 +929,17 @@ impl App {
         self.handle_api_request_after_internal_events_drained(request)
     }
 
+    /// Drop finished agent tasks of the pane that just became focused and ask for a
+    /// render so clients see the list shrink without waiting for the next event.
+    pub(crate) fn acknowledge_focused_agent_tasks(&mut self) -> bool {
+        let changed = self.state.acknowledge_focused_agent_tasks();
+        if changed {
+            self.render_dirty.request_generic();
+            self.render_notify.notify_one();
+        }
+        changed
+    }
+
     pub(crate) fn handle_api_request_after_internal_events_drained(
         &mut self,
         request: crate::api::schema::Request,

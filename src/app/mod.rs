@@ -500,6 +500,7 @@ impl App {
             active,
             previous_pane_focus: None,
             agent_task_focus: None,
+            agent_tasks_revision: 0,
             selected,
             mode,
             should_quit: false,

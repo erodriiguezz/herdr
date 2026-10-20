@@ -2038,6 +2038,21 @@ impl ClientShellState {
                     outcome.repaint = true;
                     return;
                 }
+                if let Some((endpoint_id, pane_id)) = self
+                    .hits
+                    .agent_task_toggles
+                    .iter()
+                    .find(|(rect, _, _)| super::contains(*rect, point))
+                    .map(|(_, endpoint_id, pane_id)| (endpoint_id.clone(), pane_id.clone()))
+                {
+                    // TUI-only: collapsing never focuses the pane.
+                    let collapsed = self.collapsed_agent_tasks.entry(endpoint_id).or_default();
+                    if !collapsed.remove(&pane_id) {
+                        collapsed.insert(pane_id);
+                    }
+                    outcome.repaint = true;
+                    return;
+                }
                 if self.handle_endpoint_machine_click(point, outcome) {
                     return;
                 }
