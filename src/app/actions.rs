@@ -201,12 +201,27 @@ impl AppState {
     /// When a pane becomes the focused one, drop its finished agent tasks.
     /// Cheap no-op while focus is unchanged, so it can run on every tick.
     pub(crate) fn acknowledge_focused_agent_tasks(&mut self) -> bool {
-        let current = self.current_pane_focus_target();
-        if current == self.agent_task_focus {
+        // Runs every tick: compare by reference and clone the workspace id only on change.
+        let current = self
+            .active
+            .and_then(|ws_idx| self.workspaces.get(ws_idx))
+            .and_then(|ws| Some((ws, ws.focused_pane_id()?)));
+        let unchanged = match (&current, &self.agent_task_focus) {
+            (Some((ws, pane_id)), Some(last)) => {
+                ws.id == last.workspace_id && *pane_id == last.pane_id
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        if unchanged {
             return false;
         }
-        self.agent_task_focus = current.clone();
-        let Some(target) = current else {
+        let target = current.map(|(ws, pane_id)| PaneFocusTarget {
+            workspace_id: ws.id.clone(),
+            pane_id,
+        });
+        self.agent_task_focus = target.clone();
+        let Some(target) = target else {
             return false;
         };
         let Some(terminal_id) = self
@@ -218,9 +233,14 @@ impl AppState {
         else {
             return false;
         };
-        self.terminals
+        let changed = self
+            .terminals
             .get_mut(&terminal_id)
-            .is_some_and(|terminal| terminal.agent_tasks.acknowledge_finished())
+            .is_some_and(|terminal| terminal.agent_tasks.acknowledge_finished());
+        if changed {
+            self.agent_tasks_revision = self.agent_tasks_revision.wrapping_add(1);
+        }
+        changed
     }
 
     pub(crate) fn record_pane_focus_change(
@@ -1743,8 +1763,10 @@ impl AppState {
             }
             let mutation = mutation?;
             // Background tasks belong to one agent session.
-            if mutation.session_ref_changed || mutation.agent_released {
-                terminal.agent_tasks.clear();
+            if (mutation.session_ref_changed || mutation.agent_released)
+                && terminal.agent_tasks.clear()
+            {
+                self.agent_tasks_revision = self.agent_tasks_revision.wrapping_add(1);
             }
             let completion_reset = mutation.session_ref_changed
                 || mutation

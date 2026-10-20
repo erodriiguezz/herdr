@@ -188,6 +188,25 @@ A live capture (`claude -p` in a scratch project with logging hooks) was blocked
 - Size: about 1060 added lines, roughly half of them tests, against ~200 planned.
 - **AC-2.9 deferred to a human:** a live Claude Code 2.1.304 run with real background Agent tasks could not be done in this run (the permission classifier blocks spawning agents). See Check yourself on the final PR.
 
+### M3 — feat/background-agent-tasks-p3-ui
+- Companion `endpoint.agent-tasks.v1` behind capability `agent_tasks`. The client opts in with a serde-default `EndpointClientHello.agent_tasks` flag (the `surface_scroll` precedent). The status enum has a `#[serde(other)] Unknown` fallback, which clients skip. Nothing frozen was touched.
+- The projection is built at most once per render pass, only when the task revision or the snapshot's pane set changes, and is sent only on change. A capable client gets a baseline companion on connect. Acknowledge-on-focus requests a render.
+- Sidebar: `├─`/`└─` child rows (◐ ✓ ×), `▾`/`▸` toggle, collapse state TUI-only and pruned for panes that leave. Below the toggle width, children always render. A child click focuses the parent, in single- and multi-endpoint sidebars.
+- Tests: AC-2.5 (tree, rollup, no-task parent unchanged, unknown status, narrow width), AC-2.6 (child click, toggle, two endpoints, pruning), AC-2.7 (opt-in, sent only on change, one build per pass, no rebuild on title change, baseline for a late joiner; deterministic barrier drain). New AC tests passed 8 of 8 repeated runs.
+- `just ci` green on `5e2e417a` (3944 passed, 14 skipped); `just docs-contract-test` green.
+- `just bench-render-scale`, base vs M3 run under the same conditions. Client-shell composition median at 15 panes across 6 scenarios: base 165–195 µs, M3 179–194 µs; at 1 pane both 159–172 µs. No measurable scaling change; the fixtures hold no tasks, so this measures the always-on path. `native_file_render_scale_profile` fails on both (pre-existing macOS CoW-retention issue).
+- Reviewer round 1: request changes. The 3 High were process items (bench, evidence, context), answered here. Mediums fixed: projection cost, per-frame label clones, pairing robustness, test determinism, multi-endpoint tests. Lows fixed.
+- **Deviation, AC-2.5:** when collapsed, the parent keeps its own agent status icon and the rolled-up child status (failed > working > done) is drawn beside `▸`. Replacing the icon would hide the agent's own blocked state.
+- **Deviation, Context:** this repo has no `docs/context/`, and `/docs/*` is gitignored, so the product.md and domain.md rows were not added. They are covered by `integrations.mdx` and `socket-api.mdx`.
+- Sidebar capture (test render, 26 columns, 2 tasks):
+  ```
+  expanded                    collapsed
+   ● client-shell         ▾│   ● client-shell       ◐ ▸│
+     claude                │     claude                │
+   ├─ ◐ Review the diff    │
+   └─ ✓ Write the tests    │
+  ```
+
 ## 6. Retro
 - What the plan got wrong: assumed the run could launch Claude itself to capture payloads and run the live smoke. Auto mode blocks spawning nested agents.
 - What slowed the work: the qa tooling assumes a web app: the AC scanner reads only JS/TS, UI audit needs a URL, and the size script counts inline Rust tests.

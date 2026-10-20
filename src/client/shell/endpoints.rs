@@ -339,6 +339,23 @@ impl ClientShellState {
         }
     }
 
+    pub(crate) fn set_endpoint_agent_tasks(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        generation: u64,
+        projection: crate::protocol::endpoint::EndpointAgentTasks,
+    ) {
+        if let Some(endpoint) = self
+            .endpoints
+            .iter_mut()
+            .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
+        {
+            endpoint
+                .agent_presentation
+                .receive_tasks(Some(generation), projection);
+        }
+    }
+
     pub(crate) fn set_endpoint_agent_view_projection_for_generation(
         &mut self,
         endpoint_id: &ClientEndpointId,
@@ -710,6 +727,18 @@ impl ClientShellState {
         else {
             return;
         };
+        // Forget collapse state for panes that left the snapshot.
+        if let Some(collapsed) = self.collapsed_agent_tasks.get_mut(endpoint_id) {
+            collapsed.retain(|pane_id| {
+                snapshot
+                    .agents
+                    .iter()
+                    .any(|agent| &agent.pane_id == pane_id)
+            });
+            if collapsed.is_empty() {
+                self.collapsed_agent_tasks.remove(endpoint_id);
+            }
+        }
         if endpoint_id == &self.active_endpoint_id {
             self.apply_active_snapshot(snapshot, generation);
         }

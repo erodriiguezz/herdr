@@ -101,9 +101,12 @@ impl AgentTasks {
         &self.tasks
     }
 
-    pub fn clear(&mut self) {
+    /// Returns true when a visible task was dropped.
+    pub fn clear(&mut self) -> bool {
+        let had_tasks = !self.tasks.is_empty();
         self.tasks.clear();
         self.early_finishes.clear();
+        had_tasks
     }
 
     /// Returns true when the list changed. `task_id` must come from

@@ -1682,3 +1682,180 @@ fn semantic_notifications_use_client_policy_and_stable_navigation_targets() {
     assert!(state.visible_notification.is_none());
     assert_eq!(state.pending_notifications.len(), 1);
 }
+
+fn task(
+    id: &str,
+    label: &str,
+    status: crate::protocol::endpoint::EndpointAgentTaskStatus,
+) -> crate::protocol::endpoint::EndpointAgentTask {
+    crate::protocol::endpoint::EndpointAgentTask {
+        task_id: id.into(),
+        label: label.into(),
+        agent_type: None,
+        status,
+    }
+}
+
+fn frame_lines(frame: &FrameData) -> Vec<String> {
+    frame
+        .cells
+        .chunks(frame.width as usize)
+        .map(|row| row.iter().map(|cell| cell.symbol.as_str()).collect())
+        .collect()
+}
+
+/// A shell with one Claude pane that owns `tasks`.
+fn shell_with_tasks(tasks: Vec<crate::protocol::endpoint::EndpointAgentTask>) -> ClientShellState {
+    let mut projected = snapshot();
+    projected.agents = vec![ClientShellAgent {
+        pane_id: "pane_1".into(),
+        workspace_id: "ws_1".into(),
+        tab_id: "tab_1".into(),
+        name: Some("claude".into()),
+        display_agent: None,
+        agent: Some("claude".into()),
+        title: None,
+        terminal_title: None,
+        terminal_title_stripped: None,
+        agent_status: AgentStatus::Working,
+        state_change_seq: 1,
+        state_labels: Vec::new(),
+        tokens: Vec::new(),
+        focused: true,
+    }];
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.set_snapshot(Box::new(projected));
+    state.set_pane_surface(surface());
+    if !tasks.is_empty() {
+        state.endpoints[0]
+            .agent_presentation
+            .set_test_tasks([("pane_1".to_owned(), tasks)].into_iter().collect());
+    }
+    state
+}
+
+fn click(state: &mut ClientShellState, x: u16, y: u16) -> ClientShellInput {
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: x,
+        row: y,
+        modifiers: KeyModifiers::empty(),
+    })])
+}
+
+// AC-2.5
+#[test]
+fn ac_2_5_agent_with_tasks_renders_tree_rows_and_collapses_to_rollup() {
+    use crate::protocol::endpoint::EndpointAgentTaskStatus::{Done, Working};
+    let mut state = shell_with_tasks(vec![
+        task("a", "Review the diff", Working),
+        task("b", "Write the tests", Done),
+    ]);
+    let before = frame_lines(&state.compose(106, 30).expect("frame"));
+    let sidebar = |lines: &[String]| {
+        lines
+            .iter()
+            .map(|line| line.chars().take(26).collect::<String>())
+            .collect::<Vec<_>>()
+    };
+    let expanded = sidebar(&before).join("\n");
+    assert!(expanded.contains("├─ ◐ Review the diff"), "{expanded}");
+    assert!(expanded.contains("└─ ✓ Write the tests"), "{expanded}");
+    assert!(expanded.contains('▾'), "{expanded}");
+
+    let toggle = state.hits.agent_task_toggles[0].0;
+    click(&mut state, toggle.x, toggle.y);
+    let collapsed = sidebar(&frame_lines(&state.compose(106, 30).expect("frame"))).join("\n");
+    assert!(!collapsed.contains("Review the diff"), "{collapsed}");
+    assert!(!collapsed.contains("├─"), "{collapsed}");
+    assert!(collapsed.contains('▸'), "{collapsed}");
+    assert!(
+        collapsed.contains("◐ ▸"),
+        "working outranks done: {collapsed}"
+    );
+    let mut failing = shell_with_tasks(vec![
+        task("a", "x", Working),
+        task(
+            "b",
+            "y",
+            crate::protocol::endpoint::EndpointAgentTaskStatus::Failed,
+        ),
+    ]);
+    failing.compose(106, 30).unwrap();
+    let toggle = failing.hits.agent_task_toggles[0].0;
+    click(&mut failing, toggle.x, toggle.y);
+    let text = sidebar(&frame_lines(&failing.compose(106, 30).unwrap())).join("\n");
+    assert!(text.contains("× ▸"), "failed outranks working: {text}");
+}
+
+// AC-2.5
+#[test]
+fn ac_2_5_agent_without_tasks_renders_exactly_as_before() {
+    let plain = frame_lines(&shell_with_tasks(Vec::new()).compose(106, 30).unwrap());
+    let mut empty_list = shell_with_tasks(Vec::new());
+    empty_list.endpoints[0]
+        .agent_presentation
+        .set_test_tasks([("pane_1".to_owned(), Vec::new())].into_iter().collect());
+    assert_eq!(plain, frame_lines(&empty_list.compose(106, 30).unwrap()));
+    assert!(empty_list.hits.agent_task_toggles.is_empty());
+    let text = plain.join("\n");
+    assert!(!text.contains('▾') && !text.contains("├─"));
+}
+
+// AC-2.5
+#[test]
+fn ac_2_5_unknown_task_status_is_not_drawn() {
+    use crate::protocol::endpoint::EndpointAgentTaskStatus::Unknown;
+    let mut state = shell_with_tasks(vec![task("a", "Future thing", Unknown)]);
+    let text = frame_lines(&state.compose(106, 30).unwrap()).join("\n");
+    assert!(!text.contains("Future thing"));
+    assert!(state.hits.agent_task_toggles.is_empty());
+}
+
+// AC-2.6
+#[test]
+fn ac_2_6_child_click_focuses_parent_and_toggle_click_only_collapses() {
+    use crate::protocol::endpoint::EndpointAgentTaskStatus::{Done, Working};
+    let mut state = shell_with_tasks(vec![
+        task("a", "Review the diff", Working),
+        task("b", "Write the tests", Done),
+    ]);
+    let frame = frame_lines(&state.compose(106, 30).unwrap());
+    let child_y = frame
+        .iter()
+        .position(|line| line.contains("└─ ✓ Write the tests"))
+        .expect("child row") as u16;
+    let click_out = click(&mut state, 8, child_y);
+    let [ClientShellAction::Endpoint { request, .. }] = &click_out.actions[..] else {
+        panic!("child click should focus through the endpoint API");
+    };
+    assert!(matches!(
+        &request.method,
+        crate::api::schema::Method::PaneFocus(target) if target.pane_id == "pane_1"
+    ));
+
+    let toggle = state.hits.agent_task_toggles[0].0;
+    let toggled = click(&mut state, toggle.x, toggle.y);
+    assert!(toggled.actions.is_empty() && toggled.requests.is_empty());
+    assert!(toggled.repaint);
+    let after = frame_lines(&state.compose(106, 30).unwrap()).join("\n");
+    assert!(!after.contains("Write the tests"));
+    let toggle = state.hits.agent_task_toggles[0].0;
+    click(&mut state, toggle.x, toggle.y);
+    let again = frame_lines(&state.compose(106, 30).unwrap()).join("\n");
+    assert!(again.contains("Write the tests"), "toggle expands again");
+}
+
+// AC-2.6
+#[test]
+fn ac_2_6_collapse_state_is_forgotten_for_panes_that_left_the_snapshot() {
+    use crate::protocol::endpoint::EndpointAgentTaskStatus::Working;
+    let mut state = shell_with_tasks(vec![task("a", "x", Working)]);
+    state
+        .collapsed_agent_tasks
+        .entry(ClientEndpointId::Local)
+        .or_default()
+        .insert("pane_1".into());
+    state.set_snapshot(Box::new(snapshot()));
+    assert!(state.collapsed_agent_tasks.is_empty());
+}

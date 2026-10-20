@@ -1716,19 +1716,28 @@ impl App {
         let Some(terminal_id) = self.pane_terminal(ws_idx, pane_id).map(|t| t.id.clone()) else {
             return pane_not_found(id, &params.pane_id);
         };
-        if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
-            terminal
-                .agent_tasks
-                .report(crate::terminal::agent_tasks::AgentTaskReport {
-                    source: params.source,
-                    task_id,
-                    seq: params.seq,
-                    status: params.status,
-                    description: params.description,
-                    agent_type: params.agent_type,
-                    branch: params.branch,
-                    cwd: params.cwd,
-                });
+        let changed = self
+            .state
+            .terminals
+            .get_mut(&terminal_id)
+            .is_some_and(|terminal| {
+                terminal
+                    .agent_tasks
+                    .report(crate::terminal::agent_tasks::AgentTaskReport {
+                        source: params.source,
+                        task_id,
+                        seq: params.seq,
+                        status: params.status,
+                        description: params.description,
+                        agent_type: params.agent_type,
+                        branch: params.branch,
+                        cwd: params.cwd,
+                    })
+            });
+        if changed {
+            self.state.agent_tasks_revision = self.state.agent_tasks_revision.wrapping_add(1);
+            self.render_dirty.request_generic();
+            self.render_notify.notify_one();
         }
         encode_success(id, ResponseResult::Ok {})
     }

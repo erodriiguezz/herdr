@@ -14,6 +14,57 @@ pub(super) fn snapshot(
     snapshot_with_completions(app, boot_id, revision, config_diagnostic, location).0
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static PROJECTION_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Background tasks per public pane id. Walks every pane, so callers run it at most once per
+/// render pass, and only when `AppState::agent_tasks_revision` moved or the pane set changed.
+pub(super) fn agent_tasks_projection(
+    app: &app::App,
+) -> std::collections::BTreeMap<String, Vec<protocol::endpoint::EndpointAgentTask>> {
+    #[cfg(test)]
+    PROJECTION_BUILDS.with(|builds| builds.set(builds.get() + 1));
+    use protocol::endpoint::{EndpointAgentTask, EndpointAgentTaskStatus};
+
+    use crate::api::schema::AgentTaskStatus;
+
+    let mut tasks = std::collections::BTreeMap::new();
+    for (workspace_index, workspace) in app.state.workspaces.iter().enumerate() {
+        for tab in &workspace.tabs {
+            for (pane_id, pane) in &tab.panes {
+                let Some(terminal) = app.state.terminals.get(&pane.attached_terminal_id) else {
+                    continue;
+                };
+                if terminal.agent_tasks.tasks().is_empty() {
+                    continue;
+                }
+                let Some(public_id) = app.public_pane_id(workspace_index, *pane_id) else {
+                    continue;
+                };
+                let entries = terminal
+                    .agent_tasks
+                    .tasks()
+                    .iter()
+                    .map(|task| EndpointAgentTask {
+                        task_id: task.task_id.clone(),
+                        label: task.label().to_owned(),
+                        agent_type: task.agent_type.clone(),
+                        status: match task.status {
+                            AgentTaskStatus::Working => EndpointAgentTaskStatus::Working,
+                            AgentTaskStatus::Done => EndpointAgentTaskStatus::Done,
+                            AgentTaskStatus::Failed => EndpointAgentTaskStatus::Failed,
+                        },
+                    })
+                    .collect();
+                tasks.insert(public_id, entries);
+            }
+        }
+    }
+    tasks
+}
+
 pub(super) fn snapshot_with_completions(
     app: &app::App,
     boot_id: &str,

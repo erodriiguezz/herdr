@@ -178,6 +178,12 @@ pub(crate) struct ClientConnection {
     /// Last coherent shell replacement sent to this client.
     pub(crate) shell_snapshot: Option<crate::protocol::ClientShellSnapshot>,
     pub(crate) shell_agent_completions: Option<crate::protocol::endpoint::EndpointAgentCompletions>,
+    /// Whether this shell negotiated the optional agent-tasks companion.
+    pub(crate) shell_agent_tasks_enabled: bool,
+    /// Last task map sent to this client; `None` means nothing was ever sent (empty list).
+    pub(crate) shell_agent_tasks: Option<crate::protocol::endpoint::EndpointAgentTasks>,
+    /// `AppState::agent_tasks_revision` already reflected by `shell_agent_tasks`.
+    pub(crate) shell_agent_tasks_revision: u64,
     /// View policy paired with the last coherent shell replacement.
     pub(crate) shell_agent_view: Option<crate::api::schema::AgentViewSetParams>,
     /// Monotonic shell replacement revision for this connection.
@@ -248,6 +254,9 @@ impl ClientConnection {
             shell_location: None,
             shell_snapshot: None,
             shell_agent_completions: None,
+            shell_agent_tasks_enabled: false,
+            shell_agent_tasks: None,
+            shell_agent_tasks_revision: 0,
             shell_agent_view: None,
             shell_projection_revision: 0,
             shell_endpoint_command_in_flight: false,
