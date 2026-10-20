@@ -2,11 +2,11 @@
 # managed by herdr; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # HERDR_INTEGRATION_ID=claude
-# HERDR_INTEGRATION_VERSION=11
+# HERDR_INTEGRATION_VERSION=12
 
 param([string]$Action = "")
 
-if ($Action -ne "session") { exit 0 }
+if ($Action -ne "session" -and $Action -ne "task") { exit 0 }
 if ($env:HERDR_ENV -ne "1") { exit 0 }
 if ([string]::IsNullOrWhiteSpace($env:HERDR_PANE_ID)) { exit 0 }
 
@@ -22,6 +22,72 @@ try {
 
 $propertyNames = @($payload.PSObject.Properties.Name)
 if ((Test-Path Env:CURSOR_VERSION) -or $propertyNames -ccontains "cursor_version") { exit 0 }
+# Windows PowerShell 5.1 hands native-command arguments to the child without
+# escaping embedded quotes or trailing backslashes, and the task text is model
+# written. Quote free text by the CommandLineToArgvW rules ourselves; a value
+# that already starts and ends with a quote is passed through verbatim.
+function ConvertTo-NativeArg([string]$Value) {
+    $text = $Value -replace "[\r\n]", ""
+    $text = [regex]::Replace($text, '(\\*)"', { param($m) ('\' * (2 * $m.Groups[1].Length)) + '\"' })
+    $text = [regex]::Replace($text, '(\\+)$', { param($m) '\' * (2 * $m.Groups[1].Length) })
+    return '"' + $text + '"'
+}
+
+if ($Action -eq "task") {
+    $taskId = $null
+    $taskStatus = $null
+    $description = $null
+    $agentType = $null
+    if ($payload.hook_event_name -ceq "PostToolUse") {
+        $response = $payload.tool_response
+        if (($payload.tool_name -ceq "Agent" -or $payload.tool_name -ceq "Task") -and
+            $null -ne $response -and $response.status -ceq "async_launched" -and
+            $response.agentId -is [string] -and -not [string]::IsNullOrWhiteSpace($response.agentId)) {
+            $taskId = $response.agentId.Trim()
+            $taskStatus = "working"
+            $toolInput = $payload.tool_input
+            foreach ($candidate in @($toolInput.description, $response.description)) {
+                if ($candidate -is [string] -and -not [string]::IsNullOrWhiteSpace($candidate)) {
+                    $description = $candidate.Trim()
+                    break
+                }
+            }
+            if ($toolInput.subagent_type -is [string] -and -not [string]::IsNullOrWhiteSpace($toolInput.subagent_type)) {
+                $agentType = $toolInput.subagent_type.Trim()
+            }
+        }
+    } elseif ($payload.hook_event_name -ceq "SubagentStop") {
+        if ($payload.agent_id -is [string] -and -not [string]::IsNullOrWhiteSpace($payload.agent_id)) {
+            $taskId = $payload.agent_id.Trim()
+            $taskStatus = "done"
+        }
+    }
+    if ($null -eq $taskId) { exit 0 }
+
+    # Unix nanoseconds, the same unit as the shell hook, so both order together.
+    $taskSeq = [long][DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() * 1000000
+    $herdr = if ([string]::IsNullOrWhiteSpace($env:HERDR_BIN_PATH)) { "herdr" } else { $env:HERDR_BIN_PATH }
+    try {
+        $herdrArgs = @(
+            "pane",
+            "report-task",
+            $env:HERDR_PANE_ID,
+            "--source",
+            "herdr:claude",
+            "--seq",
+            "$taskSeq",
+            (ConvertTo-NativeArg "--task-id=$taskId"),
+            "--status",
+            $taskStatus
+        )
+        if ($null -ne $description) { $herdrArgs += (ConvertTo-NativeArg "--description=$description") }
+        if ($null -ne $agentType) { $herdrArgs += (ConvertTo-NativeArg "--agent-type=$agentType") }
+        & $herdr @args 2>$null | Out-Null
+    } catch {
+    }
+    exit 0
+}
+
 if (-not ($propertyNames -ccontains "hook_event_name") -or $payload.hook_event_name -isnot [string] -or $payload.hook_event_name -cne "SessionStart") { exit 0 }
 if (-not [string]::IsNullOrWhiteSpace($payload.agent_id)) { exit 0 }
 
@@ -31,7 +97,7 @@ if ([string]::IsNullOrWhiteSpace($sessionId)) { exit 0 }
 $seq = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 $herdr = if ([string]::IsNullOrWhiteSpace($env:HERDR_BIN_PATH)) { "herdr" } else { $env:HERDR_BIN_PATH }
 try {
-    $args = @(
+    $herdrArgs = @(
         "pane",
         "report-agent-session",
         $env:HERDR_PANE_ID,
@@ -45,10 +111,10 @@ try {
         "$sessionId"
     )
     if ($payload.transcript_path -is [string] -and -not [string]::IsNullOrWhiteSpace($payload.transcript_path)) {
-        $args += @("--agent-session-path", "$($payload.transcript_path)")
+        $herdrArgs += @("--agent-session-path", "$($payload.transcript_path)")
     }
     if ($payload.hook_event_name -eq "SessionStart" -and $payload.source -is [string] -and -not [string]::IsNullOrWhiteSpace($payload.source)) {
-        $args += @("--session-start-source", "$($payload.source)")
+        $herdrArgs += @("--session-start-source", "$($payload.source)")
     }
     & $herdr @args 2>$null | Out-Null
 } catch {

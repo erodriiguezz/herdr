@@ -178,6 +178,16 @@ A live capture (`claude -p` in a scratch project with logging hooks) was blocked
 - Reviewer: approve with fixes. The 2 High process findings were answered as above; Medium `source` and Low bidi stripping go to M2; Medium focus redraw goes to M3.
 - Size: 954 counted lines, including about 400 lines of inline Rust tests and 174 lines of generated schema; about 250 lines of non-test code.
 
+### M2 — feat/background-agent-tasks-p2-logic
+- Server: tasks are owned by `source`; finishes are final (a finish applies whatever its seq, because hook processes stamp seq at process start, not at event time); a finish that arrives before its start is remembered (FIFO, max 20) and applied to that start; bidi and zero-width format characters are stripped.
+- Hook `task` action (`.sh` over the socket, `.ps1` through `herdr pane report-task` with CommandLineToArgvW quoting for Windows PowerShell 5.1); installer adds `PostToolUse` (`^(Agent|Task)$`) and `SubagentStop` once and removes them on uninstall; integration version 11 → 12.
+- `just ci` green on `ebc044c8` (3931 passed, 14 skipped); `just docs-contract-test` green. The `.ps1` test is `#[cfg(windows)]` and was not run (no Windows or pwsh here; this fork runs no CI).
+- Scripted smoke against a debug server (documented payloads piped into the `.sh` hook; no Claude launched): background launch → 1 working task "Review the diff"; foreground launch → unchanged; SubagentStop → done; focus away and back → empty.
+- Reviewer round 1: request changes. 2 High fixed (finishes final; `.ps1` argument quoting), Medium explicit uninstall flag fixed, Lows fixed. Remaining High (no live capture) recorded as a deferral below.
+- Deviation: the parity tests live in Rust (`src/integration/tests.rs`, shared `claude_task_cases()` table), not in `herdr-agent-state.test.ts`, which tests only the omp plugin.
+- Size: about 1060 added lines, roughly half of them tests, against ~200 planned.
+- **AC-2.9 deferred to a human:** a live Claude Code 2.1.304 run with real background Agent tasks could not be done in this run (the permission classifier blocks spawning agents). See Check yourself on the final PR.
+
 ## 6. Retro
 - What the plan got wrong: assumed the run could launch Claude itself to capture payloads and run the live smoke. Auto mode blocks spawning nested agents.
 - What slowed the work: the qa tooling assumes a web app: the AC scanner reads only JS/TS, UI audit needs a URL, and the size script counts inline Rust tests.

@@ -4603,6 +4603,7 @@ mod tests {
         status: crate::api::schema::AgentTaskStatus,
     ) -> crate::terminal::agent_tasks::AgentTaskReport {
         crate::terminal::agent_tasks::AgentTaskReport {
+            source: "test".into(),
             task_id: id.into(),
             seq,
             status,

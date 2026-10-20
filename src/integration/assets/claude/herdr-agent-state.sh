@@ -3,7 +3,7 @@
 # managed by herdr; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # HERDR_INTEGRATION_ID=claude
-# HERDR_INTEGRATION_VERSION=11
+# HERDR_INTEGRATION_VERSION=12
 
 set -eu
 
@@ -13,7 +13,7 @@ trap 'rm -f "$hook_input_file"' EXIT HUP INT TERM
 cat >"$hook_input_file" 2>/dev/null || true
 
 case "$action" in
-  session) ;;
+  session | task) ;;
   *) exit 0 ;;
 esac
 
@@ -47,10 +47,74 @@ if hook_input_file:
             hook_input = json.loads(content)
     except Exception:
         hook_input = {}
+if not isinstance(hook_input, dict):
+    hook_input = {}
 
 if "CURSOR_VERSION" in os.environ or "cursor_version" in hook_input:
     raise SystemExit(0)
 hook_event_name = str(hook_input.get("hook_event_name") or "")
+
+
+def send(request):
+    try:
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.settimeout(0.5)
+        client.connect(socket_path)
+        client.sendall((json.dumps(request) + "\n").encode())
+        try:
+            client.recv(4096)
+        except Exception:
+            pass
+        client.close()
+    except Exception:
+        pass
+
+
+def text(value):
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def task_params():
+    """Background Agent-tool launch (PostToolUse) or any subagent finish (SubagentStop)."""
+    if hook_event_name == "PostToolUse":
+        if hook_input.get("tool_name") not in ("Agent", "Task"):
+            return None
+        response = hook_input.get("tool_response")
+        if not isinstance(response, dict) or response.get("status") != "async_launched":
+            return None
+        task_id = text(response.get("agentId"))
+        if not task_id:
+            return None
+        tool_input = hook_input.get("tool_input")
+        if not isinstance(tool_input, dict):
+            tool_input = {}
+        params = {"task_id": task_id, "status": "working"}
+        description = text(tool_input.get("description")) or text(response.get("description"))
+        if description:
+            params["description"] = description
+        agent_type = text(tool_input.get("subagent_type"))
+        if agent_type:
+            params["agent_type"] = agent_type
+        return params
+    if hook_event_name == "SubagentStop":
+        task_id = text(hook_input.get("agent_id"))
+        if task_id:
+            return {"task_id": task_id, "status": "done"}
+    return None
+
+
+if action == "task":
+    task = task_params()
+    if task is None:
+        raise SystemExit(0)
+    send(
+        {
+            "id": f"{source}:{int(time.time() * 1000)}:{random.randrange(1_000_000):06d}",
+            "method": "pane.report_agent_task",
+            "params": {"pane_id": pane_id, "source": source, "seq": time.time_ns(), **task},
+        }
+    )
+    raise SystemExit(0)
 if hook_event_name != "SessionStart":
     raise SystemExit(0)
 is_subagent = bool(hook_input.get("agent_id"))
@@ -85,16 +149,5 @@ if agent_session_id:
 else:
     raise SystemExit(0)
 
-try:
-    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    client.settimeout(0.5)
-    client.connect(socket_path)
-    client.sendall((json.dumps(request) + "\n").encode())
-    try:
-        client.recv(4096)
-    except Exception:
-        pass
-    client.close()
-except Exception:
-    pass
+send(request)
 PY

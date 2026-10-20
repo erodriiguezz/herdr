@@ -725,12 +725,13 @@ Agents that run background tasks inside their pane (for example Claude's Agent-t
 }
 ```
 
-`task_id` is required, at most 128 characters, and must not be empty or contain control characters; otherwise the request fails with `invalid_task_id`. `status` is `working`, `done`, or `failed`. `description`, `agent_type`, `branch`, and `cwd` are optional. Herdr strips control characters and trims them, caps the first three at 200 characters and `cwd` at 1024. A later report for the same task keeps earlier optional values it omits.
+`task_id` is required, at most 128 characters, and must not be empty or contain control characters; otherwise the request fails with `invalid_task_id`. `status` is `working`, `done`, or `failed`. `description`, `agent_type`, `branch`, and `cwd` are optional. Herdr strips control characters and bidi or zero-width format characters (such as U+202E and U+200B) and trims them, caps the first three at 200 characters and `cwd` at 1024. A later report for the same task keeps earlier optional values it omits.
 
-- A report whose `seq` is not greater than the last one stored for that `task_id` is ignored.
-- `done` or `failed` for a task that was never reported as `working` is ignored.
+- Hook processes run separately, so `seq` does not reflect event order. A `done` or `failed` report from the owning source always finishes a `working` task, whatever its `seq`, and a finished task ignores later `working` reports. Other updates (`working` to `working`, finished to finished) are ignored unless their `seq` is greater than the last one stored for that `task_id`.
+- A task belongs to the `source` that first reported it. Reports for the same `task_id` from a different `source` are ignored.
+- `done` or `failed` for a task that was never reported as `working` does not create a task. Herdr remembers the last 20 such finishes, so when a `working` report from the same `source` arrives afterwards (separate hook processes can deliver a fast task's finish first), the task is created with the finished status. `task_id` must therefore be unique per task launch.
 - A pane holds at most 20 tasks. A new task beyond that evicts the oldest finished task, or the oldest task when none has finished.
-- Tasks clear when the pane's agent session changes or its agent exits.
+- Tasks, and the remembered early finishes, clear when the pane's agent session changes or its agent exits.
 - When the pane becomes the focused pane, its `done` and `failed` tasks are dropped and `working` tasks stay.
 
 An unknown pane fails with `pane_not_found`. `pane.agent_tasks` reads the list in start order:
