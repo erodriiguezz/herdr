@@ -1,16 +1,22 @@
 //! Background tasks an agent started inside its pane (for example Claude's
 //! Agent-tool subagents). Pure in-memory data: never persisted, no PTY access.
 
+use std::collections::VecDeque;
+
 use crate::api::schema::AgentTaskStatus;
 
 pub(crate) const MAX_TASKS: usize = 20;
 pub(crate) const MAX_TASK_ID_CHARS: usize = 128;
 const MAX_TEXT_CHARS: usize = 200;
 const MAX_CWD_CHARS: usize = 1024;
+/// Finishes remembered for tasks not seen yet (stop arrived before start).
+const MAX_EARLY_FINISHES: usize = 20;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AgentTask {
     pub task_id: String,
+    /// Reporter that owns the task; reports from other sources are ignored.
+    source: String,
     pub status: AgentTaskStatus,
     pub description: Option<String>,
     pub agent_type: Option<String>,
@@ -33,6 +39,7 @@ impl AgentTask {
 /// One `pane.report_agent_task` report, before sanitising.
 #[derive(Debug, Clone)]
 pub(crate) struct AgentTaskReport {
+    pub source: String,
     pub task_id: String,
     pub seq: u64,
     pub status: AgentTaskStatus,
@@ -45,11 +52,38 @@ pub(crate) struct AgentTaskReport {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct AgentTasks {
     tasks: Vec<AgentTask>,
+    early_finishes: VecDeque<EarlyFinish>,
 }
 
-/// Trim, drop control characters (C0, DEL and C1 included) and cap the length.
+/// A finish that reached the server before its task's start report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EarlyFinish {
+    source: String,
+    task_id: String,
+    seq: u64,
+    status: AgentTaskStatus,
+}
+
+/// Bidi controls, zero-width and invisible format characters.
+fn is_format_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}'
+    )
+}
+
+fn is_hidden_char(c: char) -> bool {
+    c.is_control() || is_format_char(c)
+}
+
+/// Trim, drop control and format characters (C0, DEL and C1 included) and cap
+/// the length.
 fn clean(value: Option<String>, max_chars: usize) -> Option<String> {
-    let value: String = value?.chars().filter(|c| !c.is_control()).collect();
+    let value: String = value?.chars().filter(|c| !is_hidden_char(*c)).collect();
     let value: String = value.trim().chars().take(max_chars).collect();
     let value = value.trim_end().to_owned();
     (!value.is_empty()).then_some(value)
@@ -57,7 +91,7 @@ fn clean(value: Option<String>, max_chars: usize) -> Option<String> {
 
 /// A usable task id: non-empty after cleaning and within the cap.
 pub(crate) fn clean_task_id(task_id: &str) -> Option<String> {
-    let id: String = task_id.chars().filter(|c| !c.is_control()).collect();
+    let id: String = task_id.chars().filter(|c| !is_hidden_char(*c)).collect();
     let id = id.trim();
     (!id.is_empty() && id.chars().count() <= MAX_TASK_ID_CHARS).then(|| id.to_owned())
 }
@@ -69,6 +103,7 @@ impl AgentTasks {
 
     pub fn clear(&mut self) {
         self.tasks.clear();
+        self.early_finishes.clear();
     }
 
     /// Returns true when the list changed. `task_id` must come from
@@ -78,9 +113,10 @@ impl AgentTasks {
         let agent_type = clean(report.agent_type, MAX_TEXT_CHARS);
         let branch = clean(report.branch, MAX_TEXT_CHARS);
         let cwd = clean(report.cwd, MAX_CWD_CHARS);
+        let source = clean(Some(report.source), MAX_TASK_ID_CHARS).unwrap_or_default();
 
         if let Some(task) = self.tasks.iter_mut().find(|t| t.task_id == report.task_id) {
-            if report.seq <= task.seq {
+            if source != task.source || report.seq <= task.seq {
                 return false;
             }
             task.seq = report.seq;
@@ -92,8 +128,30 @@ impl AgentTasks {
             return true;
         }
         // Only started tasks count: foreground subagents also fire stop events.
+        // The finish of an unknown task is remembered briefly instead, because
+        // hook processes can deliver a fast task's stop before its start.
         if report.status != AgentTaskStatus::Working {
+            self.remember_early_finish(EarlyFinish {
+                source,
+                task_id: report.task_id,
+                seq: report.seq,
+                status: report.status,
+            });
             return false;
+        }
+        let mut status = report.status;
+        let mut seq = report.seq;
+        if let Some(index) = self
+            .early_finishes
+            .iter()
+            .position(|f| f.source == source && f.task_id == report.task_id)
+        {
+            if let Some(finish) = self.early_finishes.remove(index) {
+                if finish.seq > report.seq {
+                    status = finish.status;
+                    seq = finish.seq;
+                }
+            }
         }
         if self.tasks.len() >= MAX_TASKS {
             let evicted = self
@@ -105,14 +163,32 @@ impl AgentTasks {
         }
         self.tasks.push(AgentTask {
             task_id: report.task_id,
-            status: report.status,
+            source,
+            status,
             description,
             agent_type,
             branch,
             cwd,
-            seq: report.seq,
+            seq,
         });
         true
+    }
+
+    fn remember_early_finish(&mut self, finish: EarlyFinish) {
+        if let Some(index) = self
+            .early_finishes
+            .iter()
+            .position(|f| f.source == finish.source && f.task_id == finish.task_id)
+        {
+            if self.early_finishes[index].seq >= finish.seq {
+                return;
+            }
+            self.early_finishes.remove(index);
+        }
+        if self.early_finishes.len() >= MAX_EARLY_FINISHES {
+            self.early_finishes.pop_front();
+        }
+        self.early_finishes.push_back(finish);
     }
 
     /// Drop finished tasks, keeping the working ones. Returns true on change.
@@ -129,6 +205,7 @@ mod tests {
 
     fn report(id: &str, seq: u64, status: AgentTaskStatus) -> AgentTaskReport {
         AgentTaskReport {
+            source: "src".into(),
             task_id: id.into(),
             seq,
             status,
@@ -242,5 +319,111 @@ mod tests {
         assert_eq!(tasks.tasks().len(), 1);
         assert_eq!(tasks.tasks()[0].task_id, "a");
         assert!(!tasks.acknowledge_finished());
+    }
+
+    // AC-2.1
+    #[test]
+    fn ac_2_1_report_from_another_source_is_ignored() {
+        let mut tasks = AgentTasks::default();
+        let mut start = report("t1", 1, AgentTaskStatus::Working);
+        start.description = Some("mine".into());
+        assert!(tasks.report(start));
+
+        let mut other = report("t1", 5, AgentTaskStatus::Done);
+        other.source = "other".into();
+        other.description = Some("hijacked".into());
+        assert!(!tasks.report(other));
+        assert_eq!(tasks.tasks()[0].status, AgentTaskStatus::Working);
+        assert_eq!(tasks.tasks()[0].label(), "mine");
+
+        assert!(tasks.report(report("t1", 2, AgentTaskStatus::Done)));
+        assert_eq!(tasks.tasks()[0].status, AgentTaskStatus::Done);
+    }
+
+    // AC-2.1
+    #[test]
+    fn ac_2_1_finish_before_start_creates_the_task_finished() {
+        let mut tasks = AgentTasks::default();
+        assert!(!tasks.report(report("t1", 10, AgentTaskStatus::Done)));
+        assert!(
+            tasks.tasks().is_empty(),
+            "an unknown finish stays invisible"
+        );
+
+        let mut start = report("t1", 5, AgentTaskStatus::Working);
+        start.description = Some("fast".into());
+        assert!(tasks.report(start));
+        assert_eq!(tasks.tasks().len(), 1);
+        assert_eq!(tasks.tasks()[0].status, AgentTaskStatus::Done);
+        assert_eq!(tasks.tasks()[0].label(), "fast");
+        assert!(!tasks.report(report("t1", 7, AgentTaskStatus::Working)));
+        assert_eq!(tasks.tasks()[0].status, AgentTaskStatus::Done);
+    }
+
+    // AC-2.1
+    #[test]
+    fn ac_2_1_early_finish_is_source_scoped_and_ignored_when_older_than_start() {
+        let mut tasks = AgentTasks::default();
+        let mut foreign = report("t1", 10, AgentTaskStatus::Failed);
+        foreign.source = "other".into();
+        tasks.report(foreign);
+        tasks.report(report("t2", 3, AgentTaskStatus::Done));
+
+        assert!(tasks.report(report("t1", 5, AgentTaskStatus::Working)));
+        assert!(tasks.report(report("t2", 4, AgentTaskStatus::Working)));
+        assert_eq!(tasks.tasks()[0].status, AgentTaskStatus::Working);
+        assert_eq!(tasks.tasks()[1].status, AgentTaskStatus::Working);
+    }
+
+    // AC-2.1
+    #[test]
+    fn ac_2_1_early_finish_memory_is_bounded_fifo_and_cleared() {
+        let mut tasks = AgentTasks::default();
+        for i in 0..=MAX_EARLY_FINISHES {
+            tasks.report(report(&format!("t{i}"), 10, AgentTaskStatus::Done));
+        }
+        // The oldest finish was forgotten; the newest is still remembered.
+        tasks.report(report("t0", 1, AgentTaskStatus::Working));
+        tasks.report(report(
+            &format!("t{MAX_EARLY_FINISHES}"),
+            1,
+            AgentTaskStatus::Working,
+        ));
+        assert_eq!(tasks.tasks()[0].status, AgentTaskStatus::Working);
+        assert_eq!(tasks.tasks()[1].status, AgentTaskStatus::Done);
+
+        tasks.report(report("late", 10, AgentTaskStatus::Done));
+        tasks.clear();
+        tasks.report(report("late", 1, AgentTaskStatus::Working));
+        assert_eq!(tasks.tasks()[0].status, AgentTaskStatus::Working);
+    }
+
+    // AC-2.2
+    #[test]
+    fn ac_2_2_bidi_and_zero_width_format_characters_stripped() {
+        let hidden: String = ('\u{200B}'..='\u{200F}')
+            .chain('\u{202A}'..='\u{202E}')
+            .chain('\u{2060}'..='\u{2064}')
+            .chain('\u{2066}'..='\u{2069}')
+            .chain(['\u{FEFF}'])
+            .collect();
+        let mut tasks = AgentTasks::default();
+        let mut r = report("t1", 1, AgentTaskStatus::Working);
+        r.description = Some(format!("a{hidden}b\u{202E}c"));
+        r.agent_type = Some(format!("{hidden}type"));
+        r.branch = Some(format!("fe{hidden}at"));
+        r.cwd = Some(format!("/tmp{hidden}/x"));
+        tasks.report(r);
+        let task = &tasks.tasks()[0];
+        assert_eq!(task.description.as_deref(), Some("abc"));
+        assert_eq!(task.agent_type.as_deref(), Some("type"));
+        assert_eq!(task.branch.as_deref(), Some("feat"));
+        assert_eq!(task.cwd.as_deref(), Some("/tmp/x"));
+        assert_eq!(
+            clean_task_id(&format!("{hidden}id{hidden}")).as_deref(),
+            Some("id")
+        );
+        assert!(clean_task_id(&hidden).is_none());
+        assert_eq!(clean_task_id("a\u{00A0}b").as_deref(), Some("a\u{00A0}b"));
     }
 }

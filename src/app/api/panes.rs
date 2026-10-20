@@ -1720,6 +1720,7 @@ impl App {
             terminal
                 .agent_tasks
                 .report(crate::terminal::agent_tasks::AgentTaskReport {
+                    source: params.source,
                     task_id,
                     seq: params.seq,
                     status: params.status,
