@@ -1393,6 +1393,14 @@
           ],
           "type": "object"
         },
+        "AgentTaskStatus": {
+          "enum": [
+            "working",
+            "done",
+            "failed"
+          ],
+          "type": "string"
+        },
         "AgentViewBuiltinField": {
           "enum": [
             "status",
@@ -2994,6 +3002,61 @@
             "pane_id",
             "source",
             "agent"
+          ],
+          "type": "object"
+        },
+        "PaneReportAgentTaskParams": {
+          "properties": {
+            "agent_type": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "branch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "cwd": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "description": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "seq": {
+              "description": "Per-task ordering; a report at or below the stored value is ignored.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "source": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/schemas/request/$defs/AgentTaskStatus"
+            },
+            "task_id": {
+              "description": "Non-empty, at most 128 characters.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "source",
+            "seq",
+            "task_id",
+            "status"
           ],
           "type": "object"
         },
@@ -5964,6 +6027,38 @@
         {
           "properties": {
             "method": {
+              "const": "pane.report_agent_task",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneReportAgentTaskParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.agent_tasks",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "pane.report_metadata",
               "type": "string"
             },
@@ -6773,6 +6868,51 @@
             "blocked",
             "done",
             "unknown"
+          ],
+          "type": "string"
+        },
+        "AgentTaskInfo": {
+          "properties": {
+            "agent_type": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "branch": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "cwd": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "label": {
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/schemas/success_response/$defs/AgentTaskStatus"
+            },
+            "task_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "task_id",
+            "label",
+            "status"
+          ],
+          "type": "object"
+        },
+        "AgentTaskStatus": {
+          "enum": [
+            "working",
+            "done",
+            "failed"
           ],
           "type": "string"
         },
@@ -7783,6 +7923,24 @@
             "busy"
           ],
           "type": "string"
+        },
+        "PaneAgentTasks": {
+          "properties": {
+            "pane_id": {
+              "type": "string"
+            },
+            "tasks": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/AgentTaskInfo"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "pane_id",
+            "tasks"
+          ],
+          "type": "object"
         },
         "PaneDirection": {
           "enum": [
@@ -9667,6 +9825,22 @@
               "required": [
                 "type",
                 "process_info"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "agent_tasks": {
+                  "$ref": "#/schemas/success_response/$defs/PaneAgentTasks"
+                },
+                "type": {
+                  "const": "pane_agent_tasks",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "agent_tasks"
               ],
               "type": "object"
             },

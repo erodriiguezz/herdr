@@ -165,9 +165,22 @@ None (TUI). M3 captures `herdr` screen text of the sidebar with tasks for the re
 
 ## 5. Evidence
 
+### Claude subagent payloads (M1 gate)
+A live capture (`claude -p` in a scratch project with logging hooks) was blocked by the run's auto-mode permission classifier ("Create Unsafe Agents"). The shapes below come from Claude Code's hook and subagent docs (code.claude.com/docs/en/hooks, /sub-agents) and still need live confirmation in AC-2.9:
+- `PostToolUse` for tool `Agent`: `tool_input` = `{prompt, description, subagent_type, model?}`. For a background launch, `tool_response` = `{status: "async_launched", agentId, description, prompt, outputFile, resolvedModel}`. Foreground: `status: "completed"`.
+- `SubagentStart`: common fields plus `agent_id`, `agent_type`; no description, no background flag.
+- `SubagentStop`: common fields plus `agent_id`, `agent_type`, `agent_transcript_path` (`…/subagents/agent-<agentId>.jsonl`), `last_assistant_message`, `stop_hook_active`. Fires "when a subagent completes", for foreground and background alike.
+- Decision: the start report comes from `PostToolUse(Agent)` with `status == "async_launched"` (task_id = `agentId`, label = `description`, type = `subagent_type`). Done comes from `SubagentStop` (task_id = `agent_id`); the server ignores a finish for a task it doesn't know. There is no documented failure signal, so the hook never sends `failed`. No `branch`: at launch the `cwd` is the parent's.
+
+### M1 — feat/background-agent-tasks-p1-data
+- `just ci` green on `be4db568`: fmt, clippy `-D warnings`, 3919 nextest tests passed (14 skipped), maintenance tests; `just docs-contract-test` green. `windows-lint` can't run locally (no Windows SDK); CI's `windows-2022` job covers it.
+- The QA script's AC scanner only reads JS/TS tests; AC-2.1–2.4 were mapped by hand to `ac_2_*` Rust tests (see `docs/reviews/2-m1.md`). App and browser stages don't apply (TUI).
+- Reviewer: approve with fixes. The 2 High process findings were answered as above; Medium `source` and Low bidi stripping go to M2; Medium focus redraw goes to M3.
+- Size: 954 counted lines, including about 400 lines of inline Rust tests and 174 lines of generated schema; about 250 lines of non-test code.
+
 ## 6. Retro
-- What the plan got wrong:
-- What slowed the work:
-- Rule, skill or fixture that would have prevented it:
+- What the plan got wrong: assumed the run could launch Claude itself to capture payloads and run the live smoke. Auto mode blocks spawning nested agents.
+- What slowed the work: the qa tooling assumes a web app: the AC scanner reads only JS/TS, UI audit needs a URL, and the size script counts inline Rust tests.
+- Rule, skill or fixture that would have prevented it: an ac-coverage pattern for Rust test names (`ac_<issue>_<n>`), plus a `project.json` flag to skip the web stages for a TUI. Proposed, not applied.
 
 ## 7. Hand-off

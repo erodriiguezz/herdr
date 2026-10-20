@@ -103,7 +103,7 @@ Raw socket method names use dot notation:
 | Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.rename`, `workspace.move`, `workspace.move_block`, `workspace.report_metadata`, `workspace.close` |
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.move`, `tab.close` |
-| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
+| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_agent_task`, `pane.agent_tasks`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
 | Popup | `popup.close` |
 | Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio` |
 | Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.start`, `agent.view.set`, `agent.view.clear` |
@@ -704,6 +704,64 @@ Both methods accept an optional `resume_argv` array with the command that resume
   }
 }
 ```
+
+Agents that run background tasks inside their pane (for example Claude's Agent-tool subagents) report them with `pane.report_agent_task`. Tasks have no pane of their own; Herdr keeps them in memory next to the pane's terminal and never persists them.
+
+```json
+{
+  "id": "req_4",
+  "method": "pane.report_agent_task",
+  "params": {
+    "pane_id": "w1:p1",
+    "source": "herdr:claude",
+    "seq": 1,
+    "task_id": "t1",
+    "status": "working",
+    "description": "Fix flaky test",
+    "agent_type": "general-purpose",
+    "branch": "feat/x",
+    "cwd": "/path/to/worktree"
+  }
+}
+```
+
+`task_id` is required, at most 128 characters, and must not be empty or contain control characters; otherwise the request fails with `invalid_task_id`. `status` is `working`, `done`, or `failed`. `description`, `agent_type`, `branch`, and `cwd` are optional. Herdr strips control characters and trims them, caps the first three at 200 characters and `cwd` at 1024. A later report for the same task keeps earlier optional values it omits.
+
+- A report whose `seq` is not greater than the last one stored for that `task_id` is ignored.
+- `done` or `failed` for a task that was never reported as `working` is ignored.
+- A pane holds at most 20 tasks. A new task beyond that evicts the oldest finished task, or the oldest task when none has finished.
+- Tasks clear when the pane's agent session changes or its agent exits.
+- When the pane becomes the focused pane, its `done` and `failed` tasks are dropped and `working` tasks stay.
+
+An unknown pane fails with `pane_not_found`. `pane.agent_tasks` reads the list in start order:
+
+```json
+{"id":"req_5","method":"pane.agent_tasks","params":{"pane_id":"w1:p1"}}
+```
+
+```json
+{
+  "id": "req_5",
+  "result": {
+    "type": "pane_agent_tasks",
+    "agent_tasks": {
+      "pane_id": "w1:p1",
+      "tasks": [
+        {
+          "task_id": "t1",
+          "label": "Fix flaky test",
+          "agent_type": "general-purpose",
+          "branch": "feat/x",
+          "cwd": "/path/to/worktree",
+          "status": "working"
+        }
+      ]
+    }
+  }
+}
+```
+
+`label` is the description, else the branch, else the agent type, else the task id.
 
 `pane.get`, `pane.list`, `agent.get`, and `agent.list` expose a read-only `agent_session` object when Herdr has a stored native session reference:
 

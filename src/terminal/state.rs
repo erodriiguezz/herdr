@@ -135,6 +135,8 @@ pub struct TerminalState {
     fallback_observed_at: Option<Instant>,
     pub hook_authority: Option<HookAuthority>,
     pub agent_metadata: HashMap<String, AgentMetadata>,
+    /// Background tasks of the current agent session; in-memory only.
+    pub(crate) agent_tasks: super::agent_tasks::AgentTasks,
     pub metadata_tokens: crate::metadata_tokens::MetadataTokens,
     pub persisted_agent_session: Option<crate::agent_resume::PersistedAgentSession>,
     reported_resume: Option<crate::agent_resume::ReportedAgentResume>,
@@ -175,6 +177,7 @@ impl TerminalState {
             fallback_observed_at: None,
             hook_authority: None,
             agent_metadata: HashMap::new(),
+            agent_tasks: Default::default(),
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
             persisted_agent_session: None,
             reported_resume: None,

@@ -212,6 +212,7 @@ herdr pane current [--pane ID|--current]
 herdr pane get <pane_id>
 herdr pane layout [--pane ID|--current]
 herdr pane process-info [--pane ID|--current]
+herdr pane tasks <pane_id>
 herdr pane neighbor --direction left|right|up|down [--pane ID|--current]
 herdr pane edges [--pane ID|--current]
 herdr pane focus --direction left|right|up|down [--pane ID|--current]
@@ -292,13 +293,23 @@ herdr pane report-agent-session <pane_id> \
   [--session-start-source SOURCE] \
   [-- RESUME_COMMAND...]
 
+herdr pane report-task <pane_id> \
+  --source ID \
+  --seq N \
+  --task-id ID \
+  --status working|done|failed \
+  [--description TEXT] \
+  [--agent-type TYPE] \
+  [--branch NAME] \
+  [--cwd PATH]
+
 herdr pane release-agent <pane_id> \
   --source ID \
   --agent LABEL \
   [--seq N]
 ```
 
-`report-agent-session` updates native session identity without reporting lifecycle state. `release-agent` ends that source's lifecycle authority when its agent process exits.
+`report-task` reports a background agent task and `tasks` prints a pane's tasks as JSON, in start order (`pane.agent_tasks`). Finished tasks are dropped when the pane is focused. `report-agent-session` updates native session identity without reporting lifecycle state. `release-agent` ends that source's lifecycle authority when its agent process exits.
 
 Arguments after `--` are the command Herdr runs to resume this session after a server restart. The first argument must be a plain command name on `PATH`, and no argument may contain an apostrophe.
 
