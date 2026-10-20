@@ -2,7 +2,7 @@
 issue: 2
 title: Background agent tasks nested under their parent
 branch: feat/background-agent-tasks
-status: approved
+status: shipped
 approved_by: Ernesto
 approved_at: 2026-10-20
 autonomy: pr
