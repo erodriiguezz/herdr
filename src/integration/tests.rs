@@ -970,9 +970,15 @@ fn install_claude_writes_hook_and_updates_settings() {
     assert!(settings["hooks"].get("UserPromptSubmit").is_none());
     assert!(settings["hooks"].get("PreToolUse").is_none());
     assert!(settings["hooks"].get("PermissionRequest").is_none());
-    assert!(settings["hooks"].get("PostToolUse").is_none());
+    assert_eq!(
+        settings["hooks"]["PostToolUse"].as_array().unwrap().len(),
+        1
+    );
     assert!(settings["hooks"].get("PostToolUseFailure").is_none());
-    assert!(settings["hooks"].get("SubagentStop").is_none());
+    assert_eq!(
+        settings["hooks"]["SubagentStop"].as_array().unwrap().len(),
+        1
+    );
     assert!(settings["hooks"].get("Stop").is_none());
     assert!(settings["hooks"].get("SessionEnd").is_none());
 
@@ -1022,14 +1028,118 @@ fn install_claude_is_idempotent_for_hook_entries() {
     assert!(settings["hooks"].get("UserPromptSubmit").is_none());
     assert!(settings["hooks"].get("PreToolUse").is_none());
     assert!(settings["hooks"].get("PermissionRequest").is_none());
-    assert!(settings["hooks"].get("PostToolUse").is_none());
+    assert_eq!(
+        settings["hooks"]["PostToolUse"].as_array().unwrap().len(),
+        1
+    );
     assert!(settings["hooks"].get("PostToolUseFailure").is_none());
-    assert!(settings["hooks"].get("SubagentStop").is_none());
+    assert_eq!(
+        settings["hooks"]["SubagentStop"].as_array().unwrap().len(),
+        1
+    );
     assert!(settings["hooks"].get("Stop").is_none());
     assert!(settings["hooks"].get("SessionEnd").is_none());
 
     std::env::remove_var("HOME");
     let _ = fs::remove_dir_all(base);
+}
+
+fn claude_task_hook_entries(settings: &Value, event: &str, hook_path: &Path) -> Vec<Value> {
+    let command = format!("bash '{}' task", hook_path.display());
+    settings["hooks"][event]
+        .as_array()
+        .map(|entries| {
+            entries
+                .iter()
+                .filter(|entry| {
+                    entry["hooks"]
+                        .as_array()
+                        .is_some_and(|hooks| hooks.iter().any(|hook| hook["command"] == command))
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+// AC-2.8
+#[test]
+fn ac_2_8_install_claude_adds_subagent_hooks_exactly_once() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    let claude_dir = home.join(".claude");
+    fs::create_dir_all(&claude_dir).unwrap();
+    fs::write(
+        claude_dir.join("settings.json"),
+        r#"{"hooks":{"PostToolUse":[{"matcher":"Edit","hooks":[{"type":"command","command":"echo keep"}]}]}}"#,
+    )
+    .unwrap();
+    std::env::set_var("HOME", &home);
+
+    let installed = install_claude().unwrap();
+    let first = fs::read_to_string(&installed.settings_path).unwrap();
+    install_claude().unwrap();
+    let second = fs::read_to_string(&installed.settings_path).unwrap();
+    let settings: Value = serde_json::from_str(&second).unwrap();
+
+    assert_eq!(first, second, "re-install must not change settings");
+    let post = claude_task_hook_entries(&settings, "PostToolUse", &installed.hook_path);
+    assert_eq!(post.len(), 1);
+    assert_eq!(post[0]["matcher"], "^(Agent|Task)$");
+    assert_eq!(post[0]["hooks"][0]["timeout"], 10);
+    let stop = claude_task_hook_entries(&settings, "SubagentStop", &installed.hook_path);
+    assert_eq!(stop.len(), 1);
+    assert!(stop[0].get("matcher").is_none());
+    assert_eq!(settings["hooks"]["PostToolUse"][0]["matcher"], "Edit");
+    assert_eq!(
+        settings["hooks"]["PostToolUse"].as_array().unwrap().len(),
+        2
+    );
+
+    std::env::remove_var("HOME");
+    let _ = fs::remove_dir_all(base);
+}
+
+// AC-2.8
+#[test]
+fn ac_2_8_uninstall_claude_removes_subagent_hooks_and_keeps_user_hooks() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    let claude_dir = home.join(".claude");
+    fs::create_dir_all(&claude_dir).unwrap();
+    fs::write(
+        claude_dir.join("settings.json"),
+        r#"{"hooks":{"SubagentStop":[{"hooks":[{"type":"command","command":"echo keep"}]}]}}"#,
+    )
+    .unwrap();
+    std::env::set_var("HOME", &home);
+
+    let installed = install_claude().unwrap();
+    uninstall_claude().unwrap();
+    let settings: Value =
+        serde_json::from_str(&fs::read_to_string(&installed.settings_path).unwrap()).unwrap();
+
+    assert!(settings["hooks"].get("PostToolUse").is_none());
+    let stop = settings["hooks"]["SubagentStop"].as_array().unwrap();
+    assert_eq!(stop.len(), 1);
+    assert_eq!(stop[0]["hooks"][0]["command"], "echo keep");
+
+    std::env::remove_var("HOME");
+    let _ = fs::remove_dir_all(base);
+}
+
+// AC-2.8
+#[test]
+fn ac_2_8_claude_integration_version_is_bumped_once_in_all_assets() {
+    assert_eq!(CLAUDE_INTEGRATION_VERSION, 12);
+    for asset in [
+        CLAUDE_HOOK_ASSET,
+        include_str!("assets/claude/herdr-agent-state.ps1"),
+    ] {
+        assert!(asset.contains("# HERDR_INTEGRATION_VERSION=12\n"));
+    }
 }
 
 #[test]
@@ -1132,7 +1242,7 @@ fn claude_v9_integration_status_is_outdated_until_reinstalled() {
 
     assert_eq!(claude.path, hook_path);
     assert_eq!(claude.installed_version, Some(9));
-    assert_eq!(claude.expected_version, 11);
+    assert_eq!(claude.expected_version, 12);
     assert_eq!(claude.state, IntegrationStatusKind::Outdated);
 
     install_claude().unwrap();
@@ -1141,7 +1251,7 @@ fn claude_v9_integration_status_is_outdated_until_reinstalled() {
         hook_path,
         CLAUDE_INTEGRATION_VERSION,
     );
-    assert_eq!(status.installed_version, Some(11));
+    assert_eq!(status.installed_version, Some(12));
     assert_eq!(status.state, IntegrationStatusKind::Current);
 
     std::env::remove_var("HOME");
@@ -1171,7 +1281,7 @@ fn claude_v2_integration_status_is_outdated() {
 
     assert_eq!(claude.path, hook_path);
     assert_eq!(claude.installed_version, Some(2));
-    assert_eq!(claude.expected_version, 11);
+    assert_eq!(claude.expected_version, 12);
     assert_eq!(claude.state, IntegrationStatusKind::Outdated);
 
     std::env::remove_var("HOME");
@@ -1300,6 +1410,267 @@ fn claude_windows_hook_reports_utf8_session_path() {
         std::env::set_var("HOME", home);
     } else {
         std::env::remove_var("HOME");
+    }
+    let _ = fs::remove_dir_all(base);
+}
+
+struct ClaudeTaskCase {
+    name: &'static str,
+    payload: &'static str,
+    /// `(task_id, status, description, agent_type)` of the expected report.
+    expected: Option<(
+        &'static str,
+        &'static str,
+        Option<&'static str>,
+        Option<&'static str>,
+    )>,
+}
+
+/// Payloads shared by the `.sh` and `.ps1` hook tests so both send the same
+/// requests.
+fn claude_task_cases() -> Vec<ClaudeTaskCase> {
+    vec![
+        ClaudeTaskCase {
+            name: "background launch",
+            payload: r#"{"hook_event_name":"PostToolUse","tool_name":"Agent","tool_input":{"prompt":"p","description":"Review diff","subagent_type":"reviewer"},"tool_response":{"status":"async_launched","agentId":"agent-abc","description":"ignored","prompt":"p","outputFile":"/tmp/o","resolvedModel":"m"}}"#,
+            expected: Some((
+                "agent-abc",
+                "working",
+                Some("Review diff"),
+                Some("reviewer"),
+            )),
+        },
+        ClaudeTaskCase {
+            name: "legacy Task tool falls back to the response description",
+            payload: r#"{"hook_event_name":"PostToolUse","tool_name":"Task","tool_input":{"prompt":"p"},"tool_response":{"status":"async_launched","agentId":"agent-old","description":"From response"}}"#,
+            expected: Some(("agent-old", "working", Some("From response"), None)),
+        },
+        ClaudeTaskCase {
+            name: "foreground tool call",
+            payload: r#"{"hook_event_name":"PostToolUse","tool_name":"Agent","tool_input":{"description":"d"},"tool_response":{"status":"completed","agentId":"agent-fg"}}"#,
+            expected: None,
+        },
+        ClaudeTaskCase {
+            name: "other tool",
+            payload: r#"{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{},"tool_response":{"status":"async_launched","agentId":"x"}}"#,
+            expected: None,
+        },
+        ClaudeTaskCase {
+            name: "launch without an agent id",
+            payload: r#"{"hook_event_name":"PostToolUse","tool_name":"Agent","tool_input":{},"tool_response":{"status":"async_launched","agentId":" "}}"#,
+            expected: None,
+        },
+        ClaudeTaskCase {
+            name: "subagent stop",
+            payload: r#"{"hook_event_name":"SubagentStop","agent_id":"agent-abc","agent_type":"reviewer","stop_hook_active":false}"#,
+            expected: Some(("agent-abc", "done", None, None)),
+        },
+        ClaudeTaskCase {
+            name: "subagent stop without an agent id",
+            payload: r#"{"hook_event_name":"SubagentStop","stop_hook_active":false}"#,
+            expected: None,
+        },
+        ClaudeTaskCase {
+            name: "unrelated event",
+            payload: r#"{"hook_event_name":"SessionStart","session_id":"s","agent_id":"a"}"#,
+            expected: None,
+        },
+    ]
+}
+
+// AC-2.8
+#[cfg(unix)]
+#[test]
+fn ac_2_8_claude_sh_hook_sends_task_requests() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+    use std::process::{Command, Stdio};
+
+    if Command::new("python3").arg("--version").output().is_err() {
+        eprintln!("python3 unavailable, skipping the shell hook test");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("hdr28-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let hook = dir.join("hook.sh");
+    fs::write(&hook, CLAUDE_HOOK_ASSET).unwrap();
+    let socket = dir.join("s.sock");
+
+    for case in claude_task_cases() {
+        let _ = fs::remove_file(&socket);
+        let listener = UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut child = Command::new("sh")
+            .arg(&hook)
+            .arg("task")
+            .env("HERDR_ENV", "1")
+            .env("HERDR_PANE_ID", "w1:p2")
+            .env("HERDR_SOCKET_PATH", &socket)
+            .env_remove("CURSOR_VERSION")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(case.payload.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "{}", case.name);
+        assert!(
+            output.stdout.is_empty() && output.stderr.is_empty(),
+            "{}",
+            case.name
+        );
+
+        let accepted = listener.accept();
+        let Some((task_id, status, description, agent_type)) = case.expected else {
+            assert!(accepted.is_err(), "{}: no request expected", case.name);
+            continue;
+        };
+        let (stream, _) = accepted.unwrap_or_else(|_| panic!("{}: request expected", case.name));
+        stream.set_nonblocking(false).unwrap();
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).unwrap();
+        let mut request: Value = serde_json::from_str(&line).unwrap();
+        let seq = request["params"]["seq"].as_u64().unwrap();
+        assert!(
+            seq > 1_000_000_000_000_000_000,
+            "{}: ns seq {seq}",
+            case.name
+        );
+        request["params"].as_object_mut().unwrap().remove("seq");
+        assert!(request["id"].as_str().unwrap().starts_with("herdr:claude:"));
+        let mut params = json!({
+            "pane_id": "w1:p2",
+            "source": "herdr:claude",
+            "task_id": task_id,
+            "status": status,
+        });
+        if let Some(description) = description {
+            params["description"] = description.into();
+        }
+        if let Some(agent_type) = agent_type {
+            params["agent_type"] = agent_type.into();
+        }
+        assert_eq!(request["method"], "pane.report_agent_task", "{}", case.name);
+        assert_eq!(request["params"], params, "{}", case.name);
+    }
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+// AC-2.8
+#[cfg(unix)]
+#[test]
+fn ac_2_8_claude_sh_task_action_needs_herdr_env() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let dir = std::env::temp_dir().join(format!("hdr28b-{}", std::process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let hook = dir.join("hook.sh");
+    fs::write(&hook, CLAUDE_HOOK_ASSET).unwrap();
+    let mut child = Command::new("sh")
+        .arg(&hook)
+        .arg("task")
+        .env_remove("HERDR_ENV")
+        .env("HERDR_PANE_ID", "w1:p2")
+        .env("HERDR_SOCKET_PATH", dir.join("missing.sock"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(claude_task_cases()[5].payload.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty() && output.stderr.is_empty());
+    let _ = fs::remove_dir_all(dir);
+}
+
+// AC-2.8
+#[cfg(windows)]
+#[test]
+fn ac_2_8_claude_ps1_hook_sends_task_requests() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let base = unique_base();
+    fs::create_dir_all(&base).unwrap();
+    let hook = base.join("hook.ps1");
+    fs::write(&hook, CLAUDE_HOOK_ASSET).unwrap();
+    let capture = base.join("args.txt");
+    let fake_herdr = base.join("herdr-capture.ps1");
+    fs::write(
+        &fake_herdr,
+        "$capture = $env:HERDR_TEST_CAPTURE\n[System.IO.File]::WriteAllText($capture, ($args -join \"`n\"), [System.Text.UTF8Encoding]::new($false))\n",
+    )
+    .unwrap();
+
+    for case in claude_task_cases() {
+        let _ = fs::remove_file(&capture);
+        let mut child = Command::new("powershell")
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(&hook)
+            .arg("task")
+            .env("HERDR_ENV", "1")
+            .env("HERDR_PANE_ID", "w1:p2")
+            .env("HERDR_BIN_PATH", &fake_herdr)
+            .env("HERDR_TEST_CAPTURE", &capture)
+            .env_remove("CURSOR_VERSION")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(case.payload.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "{}", case.name);
+
+        let Some((task_id, status, description, agent_type)) = case.expected else {
+            assert!(!capture.exists(), "{}: no request expected", case.name);
+            continue;
+        };
+        let args = fs::read_to_string(&capture).unwrap();
+        let mut lines: Vec<&str> = args.split('\n').collect();
+        assert_eq!(
+            &lines[..5],
+            ["pane", "report-task", "w1:p2", "--source", "herdr:claude"]
+        );
+        assert_eq!(lines[5], "--seq");
+        let seq: u64 = lines[6].parse().unwrap();
+        assert!(
+            seq > 1_000_000_000_000_000_000,
+            "{}: ns seq {seq}",
+            case.name
+        );
+        lines.drain(..7);
+        let mut expected = vec![
+            format!("--task-id={task_id}"),
+            "--status".into(),
+            status.into(),
+        ];
+        if let Some(description) = description {
+            expected.push(format!("--description={description}"));
+        }
+        if let Some(agent_type) = agent_type {
+            expected.push(format!("--agent-type={agent_type}"));
+        }
+        assert_eq!(lines, expected, "{}", case.name);
     }
     let _ = fs::remove_dir_all(base);
 }
